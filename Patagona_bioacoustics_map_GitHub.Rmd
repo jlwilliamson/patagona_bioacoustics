@@ -1,0 +1,242 @@
+---
+title: "Patagona Mapping - GitHub"
+author: "Jessie Williamson"
+date: "Last updated 2026-01-04"
+output: html_document
+---
+
+Code to make map in Figure 1A of Robinson et al. *Journal of Field Ornithology*. 
+
+---
+```{R}
+rm(list=ls(all=TRUE)) # clear workspace 
+setwd("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona")
+```
+
+
+# Load packages
+```{R}
+library(ggplot2)
+library(dismo) # for using function gbif
+library(dplyr)
+library(stats)
+library(gplots)
+library(plotly) # for 3D plots
+library(patchwork)
+library(tidyverse)
+
+# Mapping 
+library(raster)
+library(sp)
+library(RStoolbox)
+library(prettymapr)
+library(viridis)
+library(rasterVis)
+library(rgdal)
+library(ggspatial)
+library(mapproj)
+library(rnaturalearth) # R kept crashing when I tried to load these 
+library(rnaturalearthdata)
+library(sf)
+library(cowplot)
+library(googleway)
+library(ggrepel)
+library(maptools)
+library(mapdata)
+library(maps)
+library(grid)
+library(raster)
+library(viridis)
+library(RColorBrewer)
+library(prettymapr)
+library(rgbif) # elevation() function for obtaining elevations from migration tracks
+
+# Need to install ggmap from Github because it's outdated on CRAN (hence the error message Re: v. 2.7); boot from here: 
+# if(!requireNamespace("devtools")) install.packages("devtools")
+# devtools::install_github("dkahle/ggmap", ref = "tidyup", force=TRUE) # force=TRUE forces installation
+library(ggmap)
+```
+
+
+# Load in data 
+```{r}
+# Read in Bioacoustics data
+bio <- read.csv("/Users/Jessie/MSBbirds Dropbox/Jessie Williamson/Rdirectory/Patagona/Patagona_Bioacoustics_CleanForAnalysis_2026-01-04.csv", header=T, na.strings=c("","NA"))
+bio <- bio[ , !(colnames(bio) %in% c("X"))] # drop weird X column 1 if reading in from read.csv
+
+# Patagona shapefile
+birdlife.shape <- read_sf("/Users/Jessie/MSBbirds Dropbox/Jessie Williamson/Rdirectory/Patagona/patagona-shapefile/data_0.shp")
+```
+
+
+# READ IN ELEVATION RASTERS TO AVOID CUMBERSOME RE-PROCESSING
+Jessie has these files ready to go from Williamson et al. 2024, *PNAS*. All raster and GADM data are freely downloaded. Follow coded out chunks below. 
+```{r}
+library(raster)
+library(geodata)
+
+# # ELEVATION DATA
+# Get elev data for surrounding countries to make your map prettier
+# peru_alt <- raster::getData('alt', country = "PER", mask=TRUE) # Bolivia elev data
+# bol_alt <- raster::getData('alt', country = "BOL", mask=TRUE) # Bolivia elev data
+# arg_alt <- raster::getData('alt', country = "ARG", mask=TRUE) # Argentina elev data
+#ecu_alt <- raster::getData('alt', country = "ECU", mask=TRUE) # Ecuador elev data
+# chile_alt <- raster::getData('alt', country = "CHL", mask=TRUE) # Bolivia elev data
+# # # Note similar weirdness with Chile elevation layer as w/ Chile polygons; namely, Juan Fernandez Islands make extent wonky
+# # In Chile alt list: [[1]] = mainland, [[2]] = Juan Fernandez Islands
+# chile_alt <- chile_alt[[1]] # Assign mainland Chile to to Chile_alt because that's all I want
+
+# # # crop off Galapagos from Ecuador
+# extent(ecu_alt)
+# extent_mainland_ec <- extent(c(-82, -75.18715 , -5.015803, 1.681835 )) # Use map to pick a reasonable x min
+# # These go: xmin (left), xmax (right), ymin (bottom), ymax (top)
+# ecu_alt <- crop(ecu_alt, extent_mainland_ec) # this takes ~3-5 mins
+
+# proj4string(peru_alt) <- CRS("+init=epsg:4326")
+# proj4string(chile_alt) <- CRS("+init=epsg:4326")
+# proj4string(ecu_alt) <- CRS("+init=epsg:4326")
+# proj4string(bol_alt) <- CRS("+init=epsg:4326")
+# proj4string(arg_alt) <- CRS("+init=epsg:4326")
+
+# # # Write out raster layers
+# writeRaster(peru_alt, "peru_alt.grd", overwrite=TRUE) # Save raster files
+# writeRaster(chile_alt, "chile_alt.grd", overwrite=TRUE)
+# writeRaster(ecu_alt, "ecu_alt.grd", overwrite=TRUE) # Note that Galapagos are cropped off
+# writeRaster(bol_alt, "bol_alt.grd", overwrite=TRUE)
+# writeRaster(arg_alt, "arg_alt.grd", overwrite=TRUE)
+
+
+# START HERE IF READING IN FILES! 
+# Read in elevation layer rasters
+peru_alt <- raster("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/peru_alt.grd") 
+chile_alt <- raster("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/chile_alt.grd")
+bol_alt <- raster("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/bol_alt.grd") 
+arg_alt <- raster("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/arg_alt.grd") 
+ecu_alt <- raster("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/ecu_alt.grd") 
+south_america_elevs <- raster("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/ComparativeHummingbirdBlood/south_america_elevs.grd") # All South American country elevs combined
+pata_country_elevs <- raster("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/pata_country_elevs.grd") 
+
+# Merge all raster layers
+# Note that you have to do this step after reading in files if they're already downloaded
+# BUT, if downloading anew, merge these first and *then* write out this file
+pata_country_elevs <- merge(ecu_alt, peru_alt, bol_alt, arg_alt, chile_alt) # Merge surrounding countries w/ Chile and Peru
+#writeRaster(pata_country_elevs, "pata_country_elevs.grd", overwrite=TRUE) # Save raster files
+
+
+# DOWNLOAD COUNTRY POLYGONS 
+# Search country 3-letter ISO code: https://www.iso.org/obp/ui/#search
+# Note: Chile's southern coastline makes plotting the outline near impossible; R  crashes every time 
+# If you do want to plot outline, write straight to .pdf instead of plotting w/in RStudio
+# Best approach seems to be to crop the extent of hte outline to remove Juan Fernandez Islands
+# Then to crop and mask climate rasters to Peru and Chile
+# THEN to merge these two rasters. 
+peru <- geodata::gadm(country = "PER", level = 0, path = tempdir())
+chile <- geodata::gadm(country = "CHL", level = 0, path = tempdir())
+arg <- geodata::gadm(country = "ARG", level = 0, path = tempdir())
+bol <- geodata::gadm(country = "BOL", level = 0, path = tempdir())
+ecu <- geodata::gadm(country = "ECU", level = 0, path = tempdir())
+plot(peru)
+
+# old deprecated syntax:
+#peru <- raster::getData('GADM', country = "PER", level = 0) # download country shape  
+
+# level = 0 gives country boundary.
+# level = 1 gives first-level administrative divisions (e.g., departments).
+# You can specify path = "your/folder/path" to cache it permanently.
+
+# Crop off Juan Fernandez islands from Chile 
+ext(chile) # look at the spatial extent (lat, lon) of Chile; compare to map  
+# Assuming 'chile' is a SpatVector from geodata
+# Chile's extent goes way out into the Pacific because of Juan Fernandez Islands; get rid of these
+extent_mainland <- ext(c(-76, -66.41472, -55.98403,-17.50755)) # Use map to pick a reasonable x min
+chile <- crop(chile, extent_mainland) 
+
+# Crop off Galapagos from Ecuador
+ext(ecu) # look at the spatial extent (lat, lon) of Chile; compare to map
+# Chop of Galapagos
+extent_mainland_ec <- ext(c(-82, -75.18715 , -5.015803, 1.681835 )) # Use map to pick a reasonable x min
+# These go: xmin (left), xmax (right), ymin (bottom), ymax (top)
+ecu <- crop(ecu, extent_mainland_ec) 
+
+# Download surrounding countries for visualization/map-making
+countries <- c("BRA", "ECU", "VEN", "COL", "GUY", "SUR", "PRY", "URY", "PER", "CHL", "ARG", "BOL") 
+manycountries <- do.call(rbind, lapply(countries, function(x) geodata::gadm('GADM', country=x, level=0)))
+#plot(manycountries, col = "lightgray", border = "darkgray") # takes forever
+
+# Merge country polygons 
+# Because these are spatVector objects, need 'rbind' and not 'merge'
+southamerica_countries <- rbind(peru, chile, arg, bol, manycountries)
+pata_countries <- rbind(ecu, peru, bol, arg, chile)
+```
+
+
+###### PROCESS SPATIAL DATA 
+```{r}
+# NOW CREATE SPATIAL SUBSETS FOR BIOACOUSTICS DATA (FOR EACH NORTHERN AND SOUTHERN)
+# Subset by vocal type
+bion <- bio[which(bio$vocal_type =="type1"),] # 39 records; Type 1 = Northern
+bios <- bio[which(bio$vocal_type =="type2"),] # 114 records; Type 2 = Southern
+
+# Make spatial points data frames for N and S locality coords
+bion.coords <- SpatialPointsDataFrame(
+                   matrix(c(bion$longitude, bion$latitude), ncol = 2),
+                   data.frame(ID=1:nrow(bion),
+                   sampling.locality = bion$locality),
+                   proj4string=CRS("+init=epsg:4326")
+                   )
+
+bios.coords <- SpatialPointsDataFrame(
+                   matrix(c(bios$longitude, bios$latitude), ncol = 2),
+                   data.frame(ID=1:nrow(bios),
+                   sampling.locality = bios$locality),
+                   proj4string=CRS("+init=epsg:4326")
+                   )
+```
+
+
+# FIGURE 1A: Make a "naked" South America continent map Northern and Southern sampling + bioacoustics data
+```{r}
+# Background: grayscale, colored by elev
+# Shape: whole south american continent, countries outlined 
+
+pdf("./Patagona_Bioacoustics_Map_NorthernAndSouthern_JustBioacousticData_2025-11-22.pdf", useDingbats = F) 
+#plot(south_america_elevs, col=colorRampPalette(c("grey0","grey99"))(200), cex.axis=1.5) # original
+#plot(south_america_elevs, col=colorRampPalette(c("grey40","grey99"))(200), cex.axis=1.5) # trying subtle grayscale
+plot(south_america_elevs, col=colorRampPalette(c("#e7e7e7","grey45"))(200), cex.axis=1.5) # trying subtle grayscale
+  # RUN FOR UNBOUNDED COUNTRIES AND MAKE SURE EXT=EX IS GONE SO THAT YOU HAVE "FREE FLOATING" COUNTRIES
+#plot(south_america_elevs, col="#e7e7e7", cex.axis=1.5) 
+plot(birdlife.shape, add=TRUE, col="darkorange3", lwd=0.25, border=0)
+plot(manycountries, add=TRUE, border = "white", lwd = 0.2) # outlines surrounding countries; must be first to "layer"
+plot(peru, add=TRUE, border = "white", lwd = 0.2) # This outlines Peru 
+plot(chile, add=TRUE, border = "white", lwd = 0.2) # This outlines Peru 
+plot(bol, add=TRUE, border = "white", lwd = 0.2) # This outlines Bolivia
+plot(arg, add=TRUE, border = "white", lwd = 0.2) # This outlines Argentinas
+#plot(Ncoords, add=TRUE, pch=22, cex=1, bg="#00C5CD", col="white", lwd=0.2) # turquoise for northern 
+#plot(Scoords, add=TRUE, pch=21, cex=1, bg="#8B795E", col="white", lwd=0.2, alpha=0.5) # bg=brown for southern; outline=white
+plot(bios.coords, add=TRUE, pch=21, cex=1, bg="#bf7b00", col="white", lwd=0.22) # southern bioacoustic recordings
+plot(bion.coords, add=TRUE, pch=21, cex=1, bg="#5a7f00", col="white", lwd=0.22) # northern bioacoustic recordings 
+# plot(locality.coords, add=TRUE, pch=21, cex=1, bg="olivedrab1")  # All points in olive drab
+#points(x=-71.636, y=-33.348, cex=1.2, pch=24 , bg="white") # Add a white triangle for breeding/deployment site 
+prettymapr::addscalebar(plotepsg = 4326, widthhint=0.20, labelpadin = 0.08, label.cex = 0.8, label.col = "black", pos = "bottomleft")
+dev.off()
+
+# This is how you adjust alpha transparency: bg=alpha("#00C5CD", 0.5)
+
+# Rejected orange:
+# brigher: f99d3a 
+```
+
+
+---
+
+
+# Print environment for reproducibility
+```{r}
+sessionInfo() # List of packages and versions in use 
+```
+
+
+###########
+
+## END 
+

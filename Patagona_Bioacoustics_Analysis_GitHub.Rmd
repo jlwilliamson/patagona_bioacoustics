@@ -1,0 +1,3500 @@
+---
+title: "Patagona bioacoustics analysis"
+author: "Jessie Williamson"
+date: "created 2024-04-28; last revised 2026-01-04"
+output: html_document
+---
+
+Patagona bioacoustics analysis script for Robinson et al. *Journal of Field Ornithology*. In this script, we analyze data processed in Patagona_Bioacoustics_DataWrangling_GitHub.Rmd. See below for stastical comparisons of vocal parameters, PCA analyses, LDA analyses, comparisons with morphological analyses, main paper plots, supplement plots, and calculations for Table 1. 
+
+
+# Load packages
+```{R}
+library(reshape)
+library(car)
+library(GGally)
+library(Hmisc)
+library(gridExtra)
+library(stats)
+library(gplots)
+library(ggplot2)
+library(lsmeans)
+library(plyr)
+library(dplyr)
+library(gridExtra)
+library(MuMIn)
+library(stats4) # Knitr stopped working and asked me to add this - not sure what it does
+library(PMCMR) #Allows Kruskal-Wallis post-hocs
+library(fmsb)
+#library(faraway)
+library(reshape2)
+library(popbio)
+library(arm)
+library(ggfortify) # PCA
+library(nlme)
+library(rgbif)
+```
+
+
+---
+
+```{R}
+rm(list=ls(all=TRUE)) # clear workspace 
+setwd("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona") 
+```
+
+
+# Load data 
+Note: Data wrangled and processed in Patagona_bioacoustics_DataWrangling_GitHub.Rmd
+```{r}
+bio <- read.csv("/Users/Jessie/MSBbirds Dropbox/Jessie Williamson/Rdirectory/Patagona/Patagona_Bioacoustics_CleanForAnalysis_2026-01-04.csv", header=T, na.strings=c("","NA"))
+bio <- bio[ , !(colnames(bio) %in% c("X"))] # drop weird X column 1 if reading in from read.csv
+
+# Sometimes .csv reads in a bunch of blank rows; delete these from the outset
+#bio <- bio[-which(is.na(bio$catalog_number)),] # Drop straggler rows at the bottom with no data 
+```
+
+
+
+# Calculate new variables of interest: Duration and Frequency Bandwidth
+```{r}
+# Vocalization duration (vocalization end minus vocalization start)
+bio$song1_duration <- bio$song1_end-bio$song1_start
+bio$song2_duration <- bio$song2_end-bio$song2_start
+bio$song3_duration <- bio$song3_end-bio$song3_start
+
+# Frequency bandwidth (this is just song range; called 'frequency bandwidth' in (Odom et al.)
+# This is max freq minus min freq
+bio$song1_bandwidth <- bio$song1_maxfreq-bio$song1_minfreq
+bio$song2_bandwidth <- bio$song2_maxfreq-bio$song2_minfreq
+bio$song3_bandwidth <- bio$song3_maxfreq-bio$song3_minfreq
+```
+
+
+# Take look at prelim distributions of variables of interest for each vocalizations 1, 2, 3
+*While noting that we know we're dealing with two different species here, so we somewhat expect bimodal distributions. What we're looking for in ggpairs are any points that stand out as extreme outliers; qqplots might not be ideal, in this case (bc of bimodal expectation.)
+```{r}
+# Vocalization 1
+ggpairs_song1 <- ggpairs(subset(bio, select = c(song1_minfreq, song1_maxfreq, song1_peakfreq, song1_duration, song1_bandwidth))); print(ggpairs_song1)
+qqPlot(bio$song1_minfreq)
+qqPlot(bio$song1_maxfreq) 
+qqPlot(bio$song1_duration) 
+qqPlot(bio$song1_bandwidth)
+qqPlot(bio$song1_peakfreq)
+
+# Vocalization 2
+ggpairs_song2 <- ggpairs(subset(bio, select = c(song2_minfreq, song2_maxfreq, song2_peakfreq, song2_duration, song2_bandwidth))); print(ggpairs_song2)
+qqPlot(bio$song2_minfreq)
+qqPlot(bio$song2_maxfreq)
+qqPlot(bio$song2_duration)
+qqPlot(bio$song2_bandwidth)
+qqPlot(bio$song2_peakfreq)
+
+# Vocalization 3 
+ggpairs_song3 <- ggpairs(subset(bio, select = c(song3_minfreq, song3_maxfreq, song3_peakfreq, song3_duration, song3_bandwidth))); print(ggpairs_song3)
+qqPlot(bio$song3_minfreq)
+qqPlot(bio$song3_maxfreq)
+qqPlot(bio$song3_duration) 
+qqPlot(bio$song3_bandwidth)
+qqPlot(bio$song3_peakfreq)
+
+# These generally look pretty good, based on our expectations of N and S differences, plus distributions. 
+```
+
+
+
+# CREATE MEAN VARIABLES FOR ANALYSIS
+We'll follow the process outlined in Toews & Irwin 2008 to calculate means of each scored parameter from each individual (i.e., this is a composite meausurement of different individuals' vocalizations, meant to capture some degree of individual variation). Toews & Irwin used 5 songs per individual, but we'll use 3 vocalizations because we have such low intraspecific variation. 
+
+1) Mean min frequency
+2) Mean max frequency
+3) Mean duration
+4) Mean frequency bandwidth 
+```{r}
+# A challenge we run into here is that not all individuals have three vocalizations scored. What we want to do is take means of three when possible; 
+# if not, take means of two; and in 'dire' cases, use singleton vocalizations This isn't ideal, but we have a small dataset and want to maximize data. 
+# There is probably a much more streamlined way to do this. For now, I'll calculate means, and then coalesce to take 3 > 2 > 1. 
+
+# Mean min frequency
+min_freq_vars3 <- c("song1_minfreq", "song2_minfreq", "song3_minfreq")
+min_freq_vars2 <- c("song1_minfreq", "song2_minfreq")
+bio$mean_min_freq3 <- rowMeans(bio[min_freq_vars3])
+bio$mean_min_freq2 <- rowMeans(bio[min_freq_vars2])
+
+# Mean max frequency
+max_freq_vars3 <- c("song1_maxfreq", "song2_maxfreq", "song3_maxfreq")
+max_freq_vars2 <- c("song1_maxfreq", "song2_maxfreq")
+bio$mean_max_freq3 <- rowMeans(bio[max_freq_vars3])
+bio$mean_max_freq2 <- rowMeans(bio[max_freq_vars2])
+
+# Mean duration
+duration_vars3 <- c("song1_duration", "song2_duration", "song3_duration")
+duration_vars2 <- c("song1_duration", "song2_duration")
+bio$mean_duration3 <- rowMeans(bio[duration_vars3])
+bio$mean_duration2 <- rowMeans(bio[duration_vars2])
+# Four singletons
+
+# Mean frequency bandwidth
+bandwidth_vars3 <- c("song1_bandwidth", "song2_bandwidth", "song3_bandwidth")
+bandwidth_vars2 <- c("song1_bandwidth", "song2_bandwidth")
+bio$mean_bandwidth3 <- rowMeans(bio[bandwidth_vars3])
+bio$mean_bandwidth2 <- rowMeans(bio[bandwidth_vars2])
+
+# peak freq
+peak_freq_vars3 <- c("song1_peakfreq", "song2_peakfreq", "song3_peakfreq")
+peak_freq_vars2 <- c("song1_peakfreq", "song2_peakfreq")
+bio$mean_peak_freq3 <- rowMeans(bio[peak_freq_vars3])
+bio$mean_peak_freq2 <- rowMeans(bio[peak_freq_vars2])
+
+# Coalesce 
+bio <- 
+  bio %>% mutate(mean_min_freq = coalesce(mean_min_freq3, mean_min_freq2, song1_minfreq), # take means of 3 > 2 > singletons from vocalization 1
+                  mean_max_freq = coalesce(mean_max_freq3, mean_max_freq2, song1_maxfreq),
+                  mean_duration = coalesce(mean_duration3, mean_duration2, song1_duration),
+                  mean_bandwidth = coalesce(mean_bandwidth3, mean_bandwidth2, song1_bandwidth),
+                  mean_peakfreq = coalesce(mean_peak_freq3, mean_peak_freq2, song1_peakfreq)
+                      )
+
+# Now drop clunky temp/working variables we created above that we don't want to lung around:
+bio <- subset(bio, select = -c(mean_min_freq3,
+                                 mean_min_freq2,
+                                 mean_max_freq3,
+                                 mean_max_freq2,
+                                 mean_duration3,
+                                 mean_duration2,
+                                 mean_bandwidth3,
+                                 mean_bandwidth2,
+                                 mean_peak_freq3,
+                                 mean_peak_freq2
+                                        ) )
+```
+
+
+# Convert frequency variables to units kHz
+We typically plot vocal variables in kHz but vocalizations were scored in Hz - quick convert them here. 
+```{r}
+bio$mean_min_freq <- bio$mean_min_freq/1000
+bio$mean_max_freq <- bio$mean_max_freq/1000
+bio$mean_bandwidth <- bio$mean_bandwidth/1000
+bio$mean_peakfreq <- bio$mean_peakfreq/1000
+```
+
+
+# Take look at prelim distributions of variables of interest for mean variables
+```{r}
+# Mean vocalization variables 
+ggpairs_means <- ggpairs(subset(bio, select = c(mean_min_freq, mean_max_freq, mean_peakfreq, mean_duration, mean_bandwidth))); print(ggpairs_means)
+qqPlot(bio$mean_min_freq)
+qqPlot(bio$mean_max_freq) 
+qqPlot(bio$mean_peakfreq)
+qqPlot(bio$mean_duration) 
+qqPlot(bio$mean_bandwidth)
+
+# These generally look pretty good, based on our expectations of N and S differences, plus distributions. 
+```
+
+
+
+
+# VOCAL TYPE ANALYSIS
+After visually inspecting spectrograms to identify two principal types (Type 1: horizontal note segment vs Type 2: candy cane), now assess distribution of vocal types to understand associations with season and geography.
+
+# Convert dates to julian (ordinal) date
+```{r}
+library(lubridate)
+
+bio$date <- as.Date(with(bio, paste(year, month, day, sep = "-")), "%Y-%m-%d") # Combine year, month, and day into a date
+bio$julian.date <- yday(bio$date) # Convert to Julian date
+bio$week <- isoweek(bio$date) # Convert to week of the year
+
+# We're missing a few birds with julian dates for which we didn't have precise days of collection - this is fine for our purposes
+```
+
+
+# Figure S4 map
+Plot vocal types 1 and 2 on maps of South America, coloring by month. To show seasonal dispersion of vocal types.
+```{r}
+library(dplyr)
+library(ggplot2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+
+# Get South America basemap 
+sa <- ne_countries(continent = "south america", returnclass = "sf")
+
+# Prep data: filter type + valid coords + month
+bio_type1 <- bio %>%
+  filter(
+    vocal_type == "type1",
+    !is.na(latitude),
+    !is.na(longitude),
+    !is.na(month)
+  ) %>%
+  mutate(
+    month_factor = factor(month,
+                          levels = 1:12,
+                          labels = month.abb)  # "Jan", "Feb", ...
+  )
+
+bio_type2 <- bio %>%
+  filter(
+    vocal_type == "type2",
+    !is.na(latitude),
+    !is.na(longitude),
+    !is.na(month)
+  ) %>%
+  mutate(
+    month_factor = factor(month,
+                          levels = 1:12,
+                          labels = month.abb)  # "Jan", "Feb", ...
+  )
+
+# Set month color palette
+month_palette <- c(
+  # Oct–Jan (purples)
+  "Jan" = "#6A51A3",
+  "Feb" = "#31A354",
+  "Mar" = "#74C476",
+  "Apr" = "#A1D99B",
+
+  # Feb–May (greens)
+  "May" = "#C7E9C0",
+  "Jun" = "#E6550D",
+  
+  # Jun–Sep (oranges/reds)
+  "Jul" = "#FD8D3C",
+  "Aug" = "#FDAE6B",
+  "Sep" = "#FDD0A2",
+
+  # Back to Oct–Jan (purples)
+  "Oct" = "#807DBA",
+  "Nov" = "#9E9AC8",
+  "Dec" = "#BCBDDC"
+)
+
+# PLOT
+# Type 1
+type1_map <- ggplot() +
+  geom_sf(data = sa, fill = "grey95", color = "grey60") +
+  geom_jitter(
+    data = bio_type1,
+    aes(x = longitude, y = latitude, color = month_factor),
+    width = 0.4,    # degrees lon jitter
+    height = 0.4,   # degrees lat jitter
+    alpha = 0.8,
+    size = 3
+  ) +
+  scale_color_manual(values = month_palette, name = "Month") +
+  coord_sf(xlim = c(-82, -62), ylim = c(-37, 1)) +
+  labs(x = "Longitude", y = "Latitude", title = "Vocal Type 1") +
+  theme_minimal() +
+  guides(color = "none") # Plot type 1 w/out legend for easy combining below
+print(type1_map)
+ggsave(type1_map, filename = "VocalType1_Map_ColorByMonth_2025-11-22.pdf", bg="transparent", height=6, width=8, units="in")
+
+
+# Type 2
+type2_map <- ggplot() +
+  geom_sf(data = sa, fill = "grey95", color = "grey60") +
+  geom_jitter(
+    data = bio_type2,
+    aes(x = longitude, y = latitude, color = month_factor),
+    width = 0.4,    # degrees lon jitter
+    height = 0.4,   # degrees lat jitter
+    alpha = 0.8,
+    size = 3
+  ) +
+  scale_color_manual(values = month_palette, name = "Month") +
+  coord_sf(xlim = c(-82, -62), ylim = c(-37, 1)) +
+  labs(x = "Longitude", y = "Latitude", title = "Vocal Type 2") +
+  theme_minimal()
+print(type2_map)
+
+# PLOT MULTIPANEL FIG
+library(patchwork)
+vocal_type_maps <- (type1_map + type2_map)
+print(vocal_type_maps)
+ggsave(vocal_type_maps, filename = "VocalType_Maps_ColorByMonth_2025-11-21.pdf", bg="transparent", height=6, width=8, units="in")
+```
+
+
+
+# Figure 5: Bar plots of vocal type distributions across country 
+For each country, make a gg dotplot with time on the x-axis adn count on the y axis
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Define levels
+month_levels <- month.abb
+vocal_levels <- c("type1", "type2")
+
+# Prep data
+## Ecuador
+bio_ecu <- bio %>%
+  filter(country == "Ecuador",
+         vocal_type %in% vocal_levels,
+         !is.na(month)) %>%
+  mutate(
+    month = factor(month_levels[month], levels = month_levels, ordered = TRUE),
+    vocal_type = factor(vocal_type, levels = vocal_levels)
+  )
+
+## Peru
+bio_peru <- bio %>%
+  filter(country == "Peru",
+         vocal_type %in% vocal_levels,
+         !is.na(month)) %>%
+  mutate(
+    month = factor(month_levels[month], levels = month_levels, ordered = TRUE),
+    vocal_type = factor(vocal_type, levels = vocal_levels)
+  )
+
+## Bolivia
+bio_bol <- bio %>%
+  filter(country == "Bolivia",
+         vocal_type %in% vocal_levels,
+         !is.na(month)) %>%
+  mutate(
+    month = factor(month_levels[month], levels = month_levels, ordered = TRUE),
+    vocal_type = factor(vocal_type, levels = vocal_levels)
+  )
+
+## Argentina
+bio_arg <- bio %>%
+  filter(country == "Argentina",
+         vocal_type %in% vocal_levels,
+         !is.na(month)) %>%
+  mutate(
+    month = factor(month_levels[month], levels = month_levels, ordered = TRUE),
+    vocal_type = factor(vocal_type, levels = vocal_levels)
+  )
+
+## Chile
+bio_chile <- bio %>%
+  filter(country == "Chile",
+         vocal_type %in% vocal_levels,
+         !is.na(month)) %>%
+  mutate(
+    month = factor(month_levels[month], levels = month_levels, ordered = TRUE),
+    vocal_type = factor(vocal_type, levels = vocal_levels)
+  )
+
+
+# Full grid of all months × both types
+full_grid <- expand.grid(
+  month = factor(month_levels, levels = month_levels, ordered = TRUE),
+  vocal_type = factor(vocal_levels, levels = vocal_levels)
+)
+
+# Count using base R table() bc dplyr was being weird
+tab_ecu <- as.data.frame(table(bio_ecu$month, bio_ecu$vocal_type))
+names(tab_ecu) <- c("month", "vocal_type", "n")
+
+tab_peru <- as.data.frame(table(bio_peru$month, bio_peru$vocal_type))
+names(tab_peru) <- c("month", "vocal_type", "n")
+
+tab_bol <- as.data.frame(table(bio_bol$month, bio_bol$vocal_type))
+names(tab_bol) <- c("month", "vocal_type", "n")
+
+tab_arg <- as.data.frame(table(bio_arg$month, bio_arg$vocal_type))
+names(tab_arg) <- c("month", "vocal_type", "n")
+
+tab_chile <- as.data.frame(table(bio_chile$month, bio_chile$vocal_type))
+names(tab_chile) <- c("month", "vocal_type", "n")
+
+
+# Convert factors to correct levels
+tab_ecu$month      <- factor(tab_ecu$month, levels = month_levels, ordered = TRUE)
+tab_ecu$vocal_type <- factor(tab_ecu$vocal_type, levels = vocal_levels)
+
+tab_peru$month      <- factor(tab_peru$month, levels = month_levels, ordered = TRUE)
+tab_peru$vocal_type <- factor(tab_peru$vocal_type, levels = vocal_levels)
+
+tab_bol$month      <- factor(tab_bol$month, levels = month_levels, ordered = TRUE)
+tab_bol$vocal_type <- factor(tab_bol$vocal_type, levels = vocal_levels)
+
+tab_arg$month      <- factor(tab_arg$month, levels = month_levels, ordered = TRUE)
+tab_arg$vocal_type <- factor(tab_arg$vocal_type, levels = vocal_levels)
+
+tab_chile$month      <- factor(tab_chile$month, levels = month_levels, ordered = TRUE)
+tab_chile$vocal_type <- factor(tab_chile$vocal_type, levels = vocal_levels)
+
+
+# Merge with full grid so missing combos get n = 0
+counts_ecu <- full_grid %>%
+  left_join(tab_ecu, by = c("month", "vocal_type")) %>%
+  mutate(n = ifelse(is.na(n), 0L, n))
+
+counts_peru <- full_grid %>%
+  left_join(tab_peru, by = c("month", "vocal_type")) %>%
+  mutate(n = ifelse(is.na(n), 0L, n))
+
+counts_bol <- full_grid %>%
+  left_join(tab_bol, by = c("month", "vocal_type")) %>%
+  mutate(n = ifelse(is.na(n), 0L, n))
+
+counts_arg <- full_grid %>%
+  left_join(tab_arg, by = c("month", "vocal_type")) %>%
+  mutate(n = ifelse(is.na(n), 0L, n))
+
+counts_chile <- full_grid %>%
+  left_join(tab_chile, by = c("month", "vocal_type")) %>%
+  mutate(n = ifelse(is.na(n), 0L, n))
+
+
+# PLOTS
+# Ecuador
+ec <- ggplot(counts_ecu, aes(x = month, y = n, fill = vocal_type)) +
+  geom_col(
+    alpha = 0.8,
+    position = position_dodge2(width = 0.85, preserve = "single")
+  ) +
+  scale_y_continuous(limits = c(0, 8), breaks = 0:8) +
+  ggtitle("Ecuador") +
+  scale_fill_manual(values = c("type1" = "#5a7f00", "type2" = "#bf7b00")) +
+  labs(x = "Month", y = "Count", fill = "Vocal Type") +
+  theme_minimal()
+print(ec)
+
+# Peru
+pe <- ggplot(counts_peru, aes(x = month, y = n, fill = vocal_type)) +
+  geom_col(
+    alpha = 0.8,
+    position = position_dodge2(width = 0.85, preserve = "single")
+  ) +
+  scale_y_continuous(limits = c(0, 8), breaks = 0:8) +
+  ggtitle("Peru") +
+  scale_fill_manual(values = c("type1" = "#5a7f00", "type2" = "#bf7b00")) +
+  labs(x = "Month", y = "Count", fill = "Vocal Type") +
+  theme_minimal()
+print(pe)
+
+# Bolivia
+bo <- ggplot(counts_bol, aes(x = month, y = n, fill = vocal_type)) +
+  geom_col(
+    alpha = 0.8,
+    position = position_dodge2(width = 0.85, preserve = "single")
+  ) +
+  scale_y_continuous(limits = c(0, 33), breaks = 0:33) +
+  ggtitle("Bolivia") +
+  scale_fill_manual(values = c("type1" = "#5a7f00", "type2" = "#bf7b00")) +
+  labs(x = "Month", y = "Count", fill = "Vocal Type") +
+  theme_minimal()
+print(bo)
+
+# Argentina
+ar <- ggplot(counts_arg, aes(x = month, y = n, fill = vocal_type)) +
+  geom_col(
+    alpha = 0.8,
+    position = position_dodge2(width = 0.85, preserve = "single")
+  ) +
+  scale_y_continuous(limits = c(0, 8), breaks = 0:8) +
+  ggtitle("Argentina") +
+  scale_fill_manual(values = c("type1" = "#5a7f00", "type2" = "#bf7b00")) +
+  labs(x = "Month", y = "Count", fill = "Vocal Type") +
+  theme_minimal()
+print(ar)
+
+# Chile
+ch <- ggplot(counts_chile, aes(x = month, y = n, fill = vocal_type)) +
+  geom_col(
+    alpha = 0.8,
+    position = position_dodge2(width = 0.85, preserve = "single")
+  ) +
+  scale_y_continuous(limits = c(0, 17), breaks = 0:17) +
+  ggtitle("Chile") +
+  scale_fill_manual(values = c("type1" = "#5a7f00", "type2" = "#bf7b00")) +
+  labs(x = "Month", y = "Count", fill = "Vocal Type") +
+  theme_minimal()
+print(ch)
+
+
+# PLOT MULTIPANEL FIG
+library(patchwork)
+
+vocal_type_distribution <- (ec + pe + bo + ar + ch + 
+         plot_layout(guides = "collect"))
+print(vocal_type_distribution)
+ggsave(vocal_type_distribution, filename = "VocalTypeDistribution_ByCountry_2025-11-21.pdf", bg="transparent", height=10, width=11.5, units="in")
+```
+
+
+Other supplementary documentation (e.g., images of Type 1 and Type 2 spectrograms together with combined behavioral, genetic, etc evidence) cofirms that Type 1 corresponds to Northern Patagona and Type 2 corresponds to Southern Patagona (see main paper text for details).
+
+
+# ASSIGN VOCAL TYPES TO LINEAGE
+Because we now know that Type 1 vocal types belong to Northern Giant Hummingbirds and Type 2 vocal types belong to Southern Giant Hummingbirds, assign vocal types to lineage. 
+```{r}
+bio$lineage[bio$vocal_type == "type1"] <- "northern"
+bio$lineage[bio$vocal_type == "type2"] <- "southern"
+```
+
+
+
+### ----------------------------
+
+
+### ANALYSIS 
+
+**1)** Can giant hummingbird species be identified *in allopatry* by vocal characteristics? 
+**Approach:** Subset data by known breedings ranges for each species and compare relevant bioacoustic parameters with stats tests. Parameters of interest: min freq, max freq, vocalization duration, frequency bandwidth (range)
+
+# Make breeding range (i.e., known species) datasets
+```{r}
+# NORTHERN 
+known.northern <- bio # Instantiate
+known.northern <- known.northern[-which(known.northern$country == "Bolivia"), ] # Remove Bolivia
+  # Here, we conservatively remove Bolivia due to uncertainty with giant hummingbird species breeding ranges/months in Bolivia
+known.northern <- known.northern[-which(known.northern$country == "Argentina"), ] # Remove Argentina
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Atacama"), ] 
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Coquimbo"), ]
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Libertador General Bernardo O'Higgins"), ]
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Maule"), ]
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Ñuble"), ]
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Region de Antofagasta"), ]
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Region Metropolitana de Santiago"), ]
+known.northern <- known.northern[-which(known.northern$country == "Chile" &  known.northern$state == "Valparaiso"), ]
+known.northern <- known.northern[-which(known.northern$country == "Chile" & 
+                                          known.northern$locality == "Putre" & 
+                                          known.northern$vocal_type == "type2"), ] # Remove Type 2 vocal types from Putre; leave Type 1
+
+# Peru is more complicated; we need to filter by breeding months only
+# We have months: 2, 3, 5, 6, 7, 8, 10, 11, 12 in this dataset
+# KEEP 2, 3, 10, 11, 12 = breeding
+# DROP 5, 6, 7, 8 = non-breeding
+known.northern <- known.northern[-which(known.northern$country == "Peru" & known.northern$month == "5"), ] 
+known.northern <- known.northern[-which(known.northern$country == "Peru" & known.northern$month == "6"), ] 
+known.northern <- known.northern[-which(known.northern$country == "Peru" & known.northern$month == "7"), ] 
+known.northern <- known.northern[-which(known.northern$country == "Peru" & known.northern$month == "8"), ] 
+# Now remove the three type 2 vocal types that occur during the Peru breeding period
+known.northern <- known.northern[-which(known.northern$country == "Peru" & known.northern$month == "3" & known.northern$vocal_type == "type2"), ]
+known.northern <- known.northern[-which(known.northern$country == "Peru" & known.northern$month == "10" & known.northern$vocal_type == "type2"), ]
+known.northern <- known.northern[-which(known.northern$country == "Peru" & known.northern$month == "12" & known.northern$vocal_type == "type2"), ]
+# 24 observations 
+# Note that I'd previously done this all in one line but R syntax was reading this weirdly (a & and | mixup), so I rewrote to be more manual 
+
+# Quick map to test georeferencing - here we're looking for any major red flags that would indicate flipped lats and lons, ocean points, etc.
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+world <- ne_countries(scale = "medium", returnclass = "sf") # Download and load world map as 'sf' object
+plot(st_geometry(world), # Plot the world map with limits similar to your original code
+     xlim = c(-100, -10),
+     ylim = c(-57, 17),
+     col = "snow2",
+     axes = TRUE,
+     main = "World Map Replacement for maptools")
+box()  # Draw bounding box
+points(known.northern$longitude, known.northern$latitude, # Plot your points (replace known.southern with your actual data)
+       col = "#00C5CD", pch = 20, cex = 1)
+
+
+# SOUTHERN 
+known.southern <- bio # Instantiate
+known.southern <- known.southern[-which(known.southern$country == "Ecuador"), ] # Remove Ecuador
+known.southern <- known.southern[-which(known.southern$country == "Bolivia"), ] # Remove Bolivia (all IDs uncertain...for now)
+known.southern <- known.southern[-which(known.southern$country == "Peru"), ] # Remove Peru (Southerns only occur during the non-breeding season)
+known.southern <- known.southern[-which(known.southern$country == "Chile" & known.southern$locality == "Putre" & known.southern$vocal_type == "type1"), ] 
+# Single type1 from Putre
+known.southern <- known.southern[-which(known.southern$vocal_type == "unknown"), ] # drop single unknown
+# 54 Southern breeding range vocalizations
+
+# Note that there are 7 vocalizations from August in central Chile; these are inevitably from returning migrants. 
+# Since these are migrants, one might ask whether they 
+# constitute "breeding" range. The answer is yes, because we know that NO Northerns make it to central Chile. 
+
+# Quick map to test georeferencing - here we're looking for any major red flags that would indicate flipped lats and lons, ocean points, etc.
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+world <- ne_countries(scale = "medium", returnclass = "sf") # Download and load world map as 'sf' object
+plot(st_geometry(world), # Plot the world map with limits similar to your original code
+     xlim = c(-100, -10),
+     ylim = c(-57, 17),
+     col = "snow2",
+     axes = TRUE,
+     main = "World Map Replacement for maptools")
+box()  # Draw bounding box
+points(known.southern$longitude, known.southern$latitude, # Plot your points (replace known.southern with your actual data)
+       col = "#8B795E", pch = 20, cex = 1)
+# known.southern must be a dataframe with lat/lon
+```
+
+
+
+# ASSESS MEAN VARIABLE DISTRIBUTIONS
+Take a look at distributions
+```{r}
+# Assess Northern distributions
+ggpairs_meanminN <- ggpairs(subset(known.northern, select = c(mean_min_freq, mean_max_freq, mean_peakfreq, mean_duration, mean_bandwidth))); print(ggpairs_meanminN)
+
+# Min Freq outliers:
+# Low frequency, ML242924 -- outlier-y; clearly a Northern, Great quality recording, three vocalizations (2nd shorter than 1st and 3rd). 
+    # Spectogram end is a little fuzzy but quality is good - don't drop. 
+
+# Assign rowIDs
+known.northern$rowID <- 1:nrow(known.northern)
+
+# Northerns
+qqPlot(known.northern$mean_min_freq) # looks good
+qqPlot(known.northern$mean_max_freq) # looks good
+qqPlot(known.northern$mean_duration) # looks good
+qqPlot(known.northern$mean_bandwidth) # looks good
+
+
+## ------------------
+
+# Assess Southern distributions 
+ggpairs_meanminS <- ggpairs(subset(known.southern, select = c(mean_min_freq, mean_max_freq, mean_duration, mean_bandwidth))); print(ggpairs_meanminS)
+
+# Assign rowIDs
+known.southern$rowID <- 1:nrow(known.southern)
+
+# NOW RE-RUN GGPAIRS
+
+# Southerns
+qqPlot(known.southern$mean_min_freq) # looks good
+qqPlot(known.southern$mean_max_freq) # great
+qqPlot(known.southern$mean_duration) # obs 41 and 37 a bit high
+qqPlot(known.southern$mean_bandwidth) # looks good
+
+# ---------
+
+# Total Northern breeding vocalizations: n=24
+# Total Southern breeding vocalizations: n=54
+```
+
+
+
+# Formally test whether Northerns and Southerns differ in vocal characteristics. 
+Our prediction: Yes! 
+
+Approach: We'll use an unpaired t-test to look at whether Northern and Southern differ significantly. If assumptions are violated, use Wilcoxon signed rank test (aka Mann-Whitney test.)
+
+Assumptions: 
+1) Data are independent
+2) Data are normally distributed
+3) Variances are equal 
+Brief tutorial: http://www.sthda.com/english/wiki/unpaired-two-samples-t-test-in-r
+
+# Make combined dataset
+```{R}
+# Now we want to merge our analysis datasets together and treat these as one for comparisons: 
+comp <- rbind(known.northern, known.southern) 
+
+# Check levels
+str(comp)
+levels(comp$lineage)
+comp$lineage <- factor(comp$lineage, levels = c("southern", "northern")) # set levels
+# northern should only have Peru and Ecuador
+# Southern should only have Chile and Argentina
+
+# Now make a copy of comp, which we'll use below for Linear Discriminant Analysis testing; this is a hangover from some older code
+comp.copy <- comp 
+```
+
+
+# Test for differences 
+```{r}
+# Minimum frequency
+# Verify normal distributions (important because F test below is sensitive to non-normality)
+qqPlot(known.northern$mean_min_freq) 
+qqPlot(known.southern$mean_min_freq)
+hist(known.northern$mean_min_freq) 
+hist(known.southern$mean_min_freq)
+# looks good
+
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(comp, shapiro.test(mean_min_freq[lineage == "northern"])) # W = 0.98649, p-value = 0.9802
+with(comp, shapiro.test(mean_min_freq[lineage == "southern"])) # W = 0.98174, p-value = 0.5778
+# Result: p-value >0.05, so data are *not* sig different from normal distribution; aka, they're distributed normally
+
+# Test for equal variances: 
+var.minfreq <- var.test(mean_min_freq ~ lineage, data=comp); var.minfreq
+# Result: p-value for the F-test is <0.05 (our p = var.minfreq), so there IS a significant difference between the two variances. 
+
+# Two sample t-test, paired
+# t.minfreq <- t.test(mean_min_freq ~ lineage, data=comp,
+#             #        paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+#                     var.equal=FALSE, # verified w/ F-test above
+#                     conf.level=0.95)
+# t.minfreq
+#t = -12.35, df = 32.338, p-value = 8.729e-14
+#95% CI: -2.381628 -1.962882
+
+# Since our minimum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+w.minfreq <- wilcox.test(mean_min_freq ~ lineage, data=comp, 
+                 #   paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+                    conf.int=TRUE,
+                    conf.level=0.95)
+w.minfreq
+# W = 0, p-value = 2.384e-12
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#               2.441241               4.634737 
+
+
+# Minimum vocal frequencies are 1.89x higher in Northerns than Southerns; finding significant (p = 2.384e-12, Wilcoxon rank sum test)
+
+
+## -----
+
+# Maximum frequency
+# Verify normal distributions (important because F test below is sensitive to non-normality)
+qqPlot(known.northern$mean_max_freq) 
+qqPlot(known.southern$mean_max_freq) 
+hist(known.northern$mean_max_freq) 
+hist(known.southern$mean_max_freq)
+
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(comp, shapiro.test(mean_max_freq[lineage == "northern"])) # W = 0.96441, p-value = 0.5331
+with(comp, shapiro.test(mean_max_freq[lineage == "southern"])) # W = 0.9848, p-value = 0.7222
+# Result: p-value <0.05, so data ARE sig different from normal distribution; aka, they're not distributed normally
+
+# Test for equal variances: 
+var.maxfreq <- var.test(mean_max_freq ~ lineage, data=comp); var.maxfreq
+# F = 1.1034, num df = 54, denom df = 23, p-value = 0.8195
+# Result: p-value for the F-test is >0.05 (our p = var.maxfreq), so there is NOT a significant difference between the two variances. 
+
+# # Two sample t-test, paired 
+t.maxfreq <- t.test(mean_max_freq ~ lineage, data=comp,
+            #        paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+                    var.equal=FALSE, # verified w/ F-test above
+                    conf.level=0.95)
+t.maxfreq
+# t = -12.209, df = 45.944, p-value = 5.035e-16
+# #95% CI: -0.7416628 -0.5317132
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+# w.maxfreq <- wilcox.test(mean_max_freq ~ lineage, data=comp, 
+#                     paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+#                     conf.int=TRUE,
+#                     conf.level=0.95)
+# w.maxfreq
+# W = 375, p-value = 2.062e-08
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#               4.931912               5.573175  
+
+# Maximum vocal frequencies are 1.13x higher in Northerns than Southerns; finding significant (p = 3.924e-16, t-test)
+
+## -----
+
+# Duration
+# Verify normal distributions (important because F test below is sensitive to non-normality)
+qqPlot(known.northern$mean_duration) 
+qqPlot(known.southern$mean_duration) 
+hist(known.northern$mean_duration) 
+hist(known.southern$mean_duration)
+
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(comp, shapiro.test(mean_duration[lineage == "northern"])) # W = 0.96064, p-value = 0.4515
+with(comp, shapiro.test(mean_duration[lineage == "southern"])) # W = 0.95916, p-value = 0.0632
+# Result: p-value >0.05, so data ARE NOT sig different from normal distribution
+
+# Test for equal variances: 
+var.duration <- var.test(mean_duration ~ lineage, data=comp); var.duration
+# Result: p-value for the F-test is >0.05 (our p = var.maxfreq), so there IS NOT a significant difference between the two variances. 
+
+# Two sample t-test, paired
+t.duration <- t.test(mean_duration ~ lineage, data=comp,
+                 #   paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+                    var.equal=FALSE, # verified w/ F-test above
+                    conf.level=0.95)
+t.duration
+# # t = -15.556, df = 45.893, p-value < 2.2e-16
+# #95% CI: -0.09951238 -0.05663425
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+# w.duration <- wilcox.test(mean_duration ~ lineage, data=comp, 
+#                #     paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+#                     conf.int=TRUE,
+#                     conf.level=0.95)
+# w.duration
+# W = 2, p-value = 1.158e-12
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#             0.06116852             0.12190000 
+
+# Northern vocalizations are 1.99x longer than Southern vocalizations; finding significant (p = 4.744e-12, T-TEST; NOTE THIS CHANGED! )
+
+## -----
+
+# Bandwidth
+# Verify normal distributions (important because F test below is sensitive to non-normality)
+qqPlot(known.northern$mean_bandwidth) 
+qqPlot(known.southern$mean_bandwidth) # 8 and 11 fall out on the lower end
+hist(known.northern$mean_bandwidth) 
+hist(known.southern$mean_bandwidth)
+
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(comp, shapiro.test(mean_bandwidth[lineage == "northern"])) # W = 0.99021, p-value = 0.9967
+with(comp, shapiro.test(mean_bandwidth[lineage == "southern"])) # W = 0.97927, p-value = 0.4697
+# Result: p-value <0.05, so data ARE sig different from normal distribution; aka, they're not distributed normally
+
+# Test for equal variances: 
+var.bandwidth <- var.test(mean_bandwidth ~ lineage, data=comp); var.bandwidth
+# Result: p-value for the F-test is <0.05 (our p = var.maxfreq), so there IS a significant difference between the two variances. 
+
+# Two sample t-test, paired
+# t.bandwidth <- t.test(mean_bandwidth ~ lineage, data=comp,
+#              #       paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+#                     var.equal=FALSE, # verified w/ F-test above
+#                     conf.level=0.95)
+# t.bandwidth
+# # t = 14.338, df = 22.56, p-value = 8.063e-13
+# #95% CI: 1107.485 1611.188
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+w.bandwidth <- wilcox.test(mean_bandwidth ~ lineage, data=comp, 
+              #      paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+                    conf.int=TRUE,
+                    conf.level=0.95)
+w.bandwidth
+# W = 1287, p-value = 4.76e-12
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#              2.4906711              0.9384383 
+
+# Southerns vocalizations have 2.65x greater frequency bandwidth than Northern vocalizations; finding significant (p = 4.76e-12, Wilcoxon rank sum test)
+
+## -----
+
+# Peak Frequency
+# Verify normal distributions (important because F test below is sensitive to non-normality)
+qqPlot(known.northern$mean_peakfreq) 
+qqPlot(known.southern$mean_peakfreq) # 8 and 11 fall out on the lower end
+hist(known.northern$mean_peakfreq) 
+hist(known.southern$mean_peakfreq)
+
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(comp, shapiro.test(mean_peakfreq[lineage == "northern"])) # W = 0.96438, p-value = 0.5325
+with(comp, shapiro.test(mean_peakfreq[lineage == "southern"])) # W = 0.98167, p-value = 0.5743
+# Result: p-value <0.05, so data ARE sig different from normal distribution; aka, they're not distributed normally
+
+# Test for equal variances: 
+var.peakfreq <- var.test(mean_peakfreq ~ lineage, data=comp); var.peakfreq
+# Result: p-value for the F-test is >0.05 (our p = var.maxfreq), so there is NOT a significant difference between the two variances. 
+
+# Two sample t-test, paired
+t.peakfreq <- t.test(mean_peakfreq ~ lineage, data=comp,
+             #       paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+                    var.equal=FALSE, # verified w/ F-test above
+                    conf.level=0.95)
+t.peakfreq
+# t = -11.131, df = 42.801, p-value = 3.224e-14
+# #95% CI: -0.7000721 -0.4851241
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+# w.bandwidth <- wilcox.test(mean_peakfreq ~ lineage, data=comp, 
+#               #      paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+#                     conf.int=TRUE,
+#                     conf.level=0.95)
+# w.bandwidth
+# W = 1308, p-value = 5.113e-12
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#               4.725459               5.320776 
+
+# Northern vocalizations have 1.12x greater peak frequency than Southern vocalizations; finding significant (p = 3.224e-14, t test)
+```
+
+Summary - BREEDING RANGE ONLY DATA: 
+
+- # Minimum vocal frequencies are 1.89x higher in Northerns than Southerns; finding significant (p = 2.384e-12, Wilcoxon rank sum test); min freq is 1.87x LOWER in southerns
+- # Maximum vocal frequencies are 1.13x higher in Northerns than Southerns; finding significant (p = 3.924e-16, t-test)
+- # Northern vocalizations have 1.12x greater peak frequency than Southern vocalizations; finding significant (p = 3.224e-14, t test)
+- # Northern vocalizations are 1.99x longer than Southern vocalizations; finding significant (p = 4.744e-12, T-TEST)
+- Southerns vocalizations have 2.65x greater frequency bandwidth than Northern vocalizations; finding significant (p = 4.76e-12, Wilcoxon rank sum test)
+
+Southern vocalizations are >50% shorter with 2x the frequency range of northerns. 
+
+
+
+# Box plots of vocal variable comparisons
+```{r}
+library(ggbeeswarm)
+library(ggsignif)
+
+# Box plot of min freq for vocalization1
+(box.minfreq.ppt <- ggplot(subset(comp, lineage %in% c("southern", "northern")), aes(x=lineage, y=mean_min_freq)) +
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#8B795E", "#00C5CD")) + # southern=brown; northern=teal
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(5.3), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        # coord_cartesian(ylim = c(30, 45)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#8B795E", "#00C5CD")) + # northern=teal; southern=brown 
+        labs(y="Mean Minimum Frequency\n(kHz)",
+             x="") +
+        ggtitle("A") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+# ggsave(box.minfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_2025-04-21.pdf", height=5, width=5, units="in")
+# ggsave(box.minfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_2025-04-21_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+###---
+
+# MAX FREQ
+(box.maxfreq.ppt <- ggplot(subset(comp, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_max_freq)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#8B795E", "#00C5CD")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(6.1), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+    #    coord_cartesian(ylim = c(30, 45)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#8B795E", "#00C5CD")) + # northern=teal; southern=brown 
+        labs(y="Mean Maximum Frequency\n(kHz)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("B") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+# ggsave(box.maxfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_2025-04-21.pdf", height=5, width=5, units="in")
+# ggsave(box.maxfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_2025-04-21_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+###---
+
+# DURATION
+(box.duration.ppt <- ggplot(subset(comp, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_duration)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#8B795E", "#00C5CD")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(0.25), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+    #    coord_cartesian(ylim = c(30, 45)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#8B795E", "#00C5CD")) + # northern=teal; southern=brown 
+        labs(y="Mean Duration\n(secs)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("C") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.3,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+# ggsave(box.duration.ppt, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_2025-04-21.pdf", height=5, width=5, units="in")
+# ggsave(box.duration.ppt, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_2025-04-21_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+###---
+
+# Frequency Bandwidth 
+(box.bandwidth.ppt <- ggplot(subset(comp, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_bandwidth)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#8B795E", "#00C5CD")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(4.2), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+      #  coord_cartesian(ylim = c(4000, 16000)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#8B795E", "#00C5CD")) + # northern=teal; southern=brown 
+        labs(y="Mean Frequency Range\n(kHz)", 
+             x="") +
+       # ggtitle("D") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+# ggsave(box.bandwidth.ppt, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_2025-04-21.pdf", height=5, width=5, units="in")
+# ggsave(box.bandwidth.ppt, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_2025-04-21_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+# PLOT MULTIPANEL FIG
+library(patchwork)
+# BioacousticBoxPlots_4Panel_ForTalks <- (box.minfreq.ppt + box.maxfreq.ppt + box.duration.ppt + box.bandwidth.ppt)
+# print(BioacousticBoxPlots_4Panel_ForTalks)
+# ggsave(BioacousticBoxPlots_4Panel_ForTalks, filename = "BioacousticsBoxPlots_NorthernVsSouthern_ForTalks_2024-11-11.pdf", bg="transparent", height=7.2, width=7.2, units="in")
+
+BioacousticBoxPlots_4Panel <- (box.minfreq.ppt + box.maxfreq.ppt + box.duration.ppt + box.bandwidth.ppt)
+print(BioacousticBoxPlots_4Panel)
+ggsave(BioacousticBoxPlots_4Panel, filename = "BioacousticsBoxPlots_NorthernVsSouthern_Multipanel_2025-04-21.pdf", bg="transparent", height=8.2, width=8.2, units="in")
+# height 7.2 x 7.2 was cutting stuff off at top of plots
+```
+
+
+
+
+#### PCA
+
+# Standardize PCA inputs 
+```{R}
+# Function to standardize data
+standardize <- function(x) {
+  mu <- mean(x, na.rm=TRUE)
+  sigma <- sd(x, na.rm=TRUE)
+  y <- (x - mu)/sigma
+  return(y)
+}
+
+# Standardize data 
+comp$mean_min_freq_z <- standardize(comp$mean_min_freq)
+comp$mean_max_freq_z <- standardize(comp$mean_max_freq)
+comp$mean_duration_z <- standardize(comp$mean_duration)
+comp$mean_bandwidth_z <- standardize(comp$mean_bandwidth)
+comp$mean_peakfreq_z <- standardize(comp$mean_peakfreq)
+
+
+# Take a look at correlations between predictors - Correlation matrix 
+cor(comp[,c("mean_min_freq_z", "mean_max_freq_z", "mean_peakfreq_z", "mean_duration_z", "mean_bandwidth_z")])
+
+#                  mean_min_freq_z mean_max_freq_z mean_peakfreq_z mean_duration_z mean_bandwidth_z
+# mean_min_freq_z        1.0000000       0.7464069       0.7373507       0.7299720       -0.9614763
+# mean_max_freq_z        0.7464069       1.0000000       0.9880411       0.7783329       -0.5347173
+# mean_peakfreq_z        0.7373507       0.9880411       1.0000000       0.7470683       -0.5281577
+# mean_duration_z        0.7299720       0.7783329       0.7470683       1.0000000       -0.6054106
+# mean_bandwidth_z      -0.9614763      -0.5347173      -0.5281577      -0.6054106        1.0000000
+
+# We don't mind correlations between min and max frequencies (these are likely related to species identities)
+# i.e., low min is probably always correlated with high max and that's becuase those are always Southern birds
+# Similarly, we don't mind correlations w/ duration because we expect that Northern vocalizations are always longer ...so we *expect* correlation 
+# But what this tells us is that bandwidth is tightly correlated w/ min and max freqs; and since we calculated bandwidth FROM min and max freqs, 
+# We want to exclude it from PCA. 
+
+# Part of our goal here is to figure out whether we can distinguish these two species by vocalization And we can't "hear" bandwidth, which is a secondary 
+# variable we've calculated. But we *can* hear lower and higher frequencies and shorter vocalizations 
+```
+
+
+# SUBSET DATASET FOR PCA
+```{r}
+comp.sub <- subset(comp, select = c(catalog_number,
+                                    country,
+                                    lineage,
+                                    mean_min_freq,
+                                    mean_min_freq_z,
+                                    mean_max_freq,
+                                    mean_max_freq_z,
+                                    mean_duration,
+                                    mean_duration_z
+                           #         mean_peakfreq_z
+                           #         mean_bandwidth,
+                           #         mean_bandwidth_z # see notes above; excluding because secondary variable and correlated w/ min and max
+                                        ) )
+
+# This is a complete datafram with no NAs. That said, We  can't have any NA data to run PCA, so we'll use na.omit() here. 
+# Check the number of observations in the data frame before and after running this; if they differ, circle back to the top and revisit why. 
+comp.sub <- na.omit(comp.sub) 
+```
+
+
+
+# PRINCIPAL COMPONENTS ANALYSIS (PCA) 
+```{R}
+# Subset by just variables we'll use need for PCA
+# Basically: We want to drop 'locality' since many localities are missing data and this will cause problems 
+rownames(comp.sub) <- comp.sub$catalog_number
+comp.sub.pca <- comp.sub[, c("mean_min_freq_z", "mean_max_freq_z", "mean_duration_z")]
+
+#  Relevel factors so order shows up as you want in plots 
+str(comp.sub$lineage)
+comp.sub$lineage <- factor(comp.sub$lineage, levels = c("southern", "northern")) 
+levels(comp.sub$lineage)
+
+str(comp.sub$country)
+comp.sub$country <- as.factor(comp.sub$country)
+comp.sub$country <- factor(comp.sub$country, levels = c("Argentina", "Chile", "Ecuador", "Peru")) 
+levels(comp.sub$country)
+# Remember no Bolivia here 
+
+# Make vectors to plot ellipses with ggbiplot
+breed.country <- comp.sub[, "country"]
+breed.country <- factor(breed.country, levels = c("Argentina", "Chile", "Ecuador", "Peru")) # No Bolivia here 
+breed.lineage <- comp.sub[, "lineage"]
+breed.lineage <- factor(breed.lineage, levels = c("southern", "northern")) 
+
+
+# RUN PCA 
+comp.sub.pca.output <- prcomp(comp.sub.pca, center=TRUE, scale.=TRUE) 
+
+print(comp.sub.pca.output) # Get PCA loadings
+# also achieved w/ pg.pca$rotation
+
+summary(comp.sub.pca.output) # Get importance of components 
+
+# Importance of components:
+#                          PC1     PC2     PC3
+# Standard deviation     1.5822 0.52601 0.46903
+# Proportion of Variance 0.8344 0.09223 0.07333
+# Cumulative Proportion  0.8344 0.92667 1.00000
+
+# First two PCs explain ~92.6% of variation.
+
+# visualize how much variance is explained by top PCs
+screeplot(comp.sub.pca.output) # PC1 basically separates the two species
+plot(comp.sub.pca.output, type = "l")
+biplot(comp.sub.pca.output)
+autoplot(comp.sub.pca.output)
+```
+
+
+
+# Plot the outputs
+
+# Quick plot, no ellipses
+```{r}
+library(ggbiplot)
+
+# No ellipses - just a way to get a quick sense of how data look
+(quick.breedingpca.plot <- ggbiplot::ggbiplot(comp.sub.pca.output, obs.scale = 1, var.scale = 1, ellipse = TRUE, circle = FALSE, 
+                        var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(quick.breedingpca.plot)
+# ggsave(song1.allpca.plot, filename="Patagona_NorthernVersusSouthern_RangewideBioClimPCA_All19BioClimVars_2023-11-18.pdf", height=7, width=9, units="in")
+```
+
+
+# PCA plot w/ ellipses by lineage 
+```{r}
+(breedingpca.plot.ellipselineage <- ggbiplot::ggbiplot(comp.sub.pca.output, obs.scale = 0.5, group=breed.lineage, var.scale = 1, ellipse = TRUE, circle = FALSE, var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        scale_color_manual(name="lineage", values=c("#8B795E", "#00C5CD")) +
+        geom_point(aes(colour=breed.lineage), size = 3) +
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(breedingpca.plot.ellipselineage)
+ggsave(breedingpca.plot.ellipselineage, filename="Patagona_Bioacoustics_PCA_NorthernVersusSouthern_2025-11-22.pdf", height=7, width=9, units="in")
+```
+
+
+# Ellipses by country 
+```{r}
+# COUNTRY COLORS 
+# Argentina (mustard): #F2C900
+# Peru (light dull blue): #99B5BC
+# Ecuador (navy): #196C91
+# Chile (red): #FF0000
+# "darkorchid2",  - purple to use for Bolivia
+
+# Ellipses by country -- 
+
+# Note that ellipses are going to look like they're "pulled" because we expect some N Chile birds to fall out w/ each N and S
+# So Chile will look stretched. 
+
+# order of countries goes: Argentina, Chile, Ecuador, Peru
+
+(breeding.pca.plot.country <- ggbiplot::ggbiplot(comp.sub.pca.output, obs.scale = 1, group=breed.country, var.scale = 1, ellipse = TRUE, circle = FALSE,
+                        var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        scale_color_manual(name="country", values=c("#F2C900", "#FF0000", "#196C91", "#99B5BC")) +
+        geom_point(aes(colour=breed.country), size = 3) +
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(breeding.pca.plot.country)
+#ggsave(breeding.pca.plot.country, filename="Patagona_Bioacoustics_PCA_NorthernVersusSouthern_ColorByCountry_2025-04-21.pdf", height=7, width=9, units="in")
+
+```
+
+
+# Points by country, ellipses by species
+```{r}
+
+# COUNTRY COLORS 
+# Argentina (mustard): #F2C900
+# Peru (light dull blue): #99B5BC
+# Ecuador (navy): #196C91
+# Chile (red): #FF0000
+# "darkorchid2",  - purple to use for Bolivia
+
+# Bryce new colors:
+# southern: bf7b00
+# northern: 5a7f00
+
+library(ggnewscale)
+
+(breeding.pca.plot.country.ellipseNS <- ggbiplot::ggbiplot(comp.sub.pca.output, obs.scale = 1, var.scale = 1, group=breed.country, ellipse = FALSE, circle = TRUE,var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+      stat_ellipse(aes(group=breed.lineage, color = breed.lineage), type = "norm", size = 1) + # Plot ellipses first so points are layered OVER
+      scale_color_manual(name="lineage", values=c("southern"="darkgray", "northern"="darkgray")) + 
+      new_scale_color() + # Add new scale for points
+      geom_point(aes(colour=breed.country), size = 3) +
+      scale_color_manual(name="country", values=c("Argentina"="#F2C900", "Chile"="#FF0000", "Ecuador"="#196C91", "Peru"="#99B5BC")) +
+    #    scale_color_manual(name="lineage", values=c("southern"="#8B795E", "northern"="#00C5CD")) + # Jessie old colors (brown and teal)
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_blank(), 
+             axis.line = element_line(),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(breeding.pca.plot.country.ellipseNS)
+ggsave(breeding.pca.plot.country.ellipseNS, filename="Patagona_Bioacoustics_PCA_NorthernVersusSouthern_ColorByCountry_EllipseColorBySpecies_2025-11-22.pdf", height=7, width=9, units="in")
+```
+
+
+
+#### LINEAR DISCRIMINANT ANALYSIS TO PLACE UNKNOWNS TO LINEAGE
+
+**2)** Can vocalizations be used to reliably identify giant hummingbird species in the field? 
+**Approach:** Use LDA with breeding-only data to train a model, then test it with non-breeding range data  
+
+## LINEAR DISCRIMINANT ANALYSIS
+
+# First pass at LDA
+```{r}
+# Let's use our .nona data from PCA above to make things simple 
+comp.sub.lda <- comp.sub
+scatterplotMatrix(comp.sub.lda[c(5,7,9)])
+
+# Check structure
+str(comp.sub.lda) # good, all numeric
+
+# Scale morpho predictors
+#comp.sub.lda[, c("bill", "wing", "tail")] <- scale(comp.sub.lda[, c("bill", "wing", "tail")])
+#comp.sub.lda[14:16] <- scale(comp.sub.lda[14:16]) # Scale by  calling by column number, which is dangerous
+
+## Take a look at the data, though we largely already have
+# This can help us identify variables that can help separate out species 
+library(psych)
+pairs.panels(comp.sub.lda[c(5,7,9)],
+             method="pearson", # Pearson correlation coefficient
+             hist.col = "olivedrab3", # color histogram
+             density=TRUE, # show density plots
+             gap = 0,
+             ellipses=TRUE,
+            # ci=TRUE, # Adds 95% confidence intervals
+          #   lm=TRUE,
+             bg = c("#8B795E", "#00C5CD")[comp.sub.lda$lineage],
+             pch = 21)
+
+# Top right-hand corner gives us correlation coefficients
+# Bottom left scatter plots show separation of the data with different combinations of variables 
+# This confirms what we know: These two things are super separable by vocalization
+```
+
+
+# 1) Create LDA training and test datasets 
+```{r}
+set.seed(32567) # set seed 
+
+# First we want to create a training and test data set from these known data to test our model. 
+# THEN, once we've vetted the model, we'll circle back to using our actual unknown data as test data. 
+# Use 80% of dataset as training set and remaining 20% as testing set
+
+# Calculate the exact number of rows for training
+train.size <- floor(0.8 * nrow(comp.sub.lda))
+
+# Randomly select row indices for training (no replacement)
+train.indices <- sample(seq_len(nrow(comp.sub.lda)), size = train.size, replace = FALSE)
+  # Make sure replace=FALSE! Otherwise we may select the same data with replacement, which isn't best practice for LDA. 
+
+# Split the data
+train.comp <- comp.sub.lda[train.indices, ]
+test.comp <- comp.sub.lda[-train.indices, ]
+
+# Check the split
+cat("Training set size:", nrow(train.comp), "\n")
+cat("Test set size:", nrow(test.comp), "\n")
+```
+
+
+# 2) FIT LDA MODEL and evaluate model performance on training data
+```{r}
+library(MASS)
+
+# Make response variable (lineage) is a factor
+str(train.comp)
+train.comp$lineage <- as.factor(train.comp$lineage)
+
+# Fit the LDA model using specified variables
+model.comp <- lda(lineage ~ mean_min_freq_z + mean_max_freq_z + mean_duration_z, data = train.comp); model.comp
+
+## EVALUATE MODEL PERFORMANCE ON TRAINING DATA
+# Predict on training data
+train_predictions <- predict(model.comp, train.comp)
+train_confusion_matrix <- table(Predicted = train_predictions$class, Actual = train.comp$lineage)
+
+# Display confusion matrix and accuracy
+cat("\nTraining Confusion Matrix:\n")
+print(train_confusion_matrix)
+
+#           Actual
+# Predicted  southern northern
+#   southern       45        0
+#   northern        0       17
+
+train_accuracy <- sum(diag(train_confusion_matrix)) / sum(train_confusion_matrix)
+cat("\nTraining Accuracy:", round(train_accuracy * 100, 2), "%\n")
+# Training accuracy is 100%
+```
+
+
+# 3) MAKE PREDICTIONS AND MERGE DATA FOR PLOTTING
+```{r}
+# Predict on test data
+preds.comp <- predict(model.comp, test.comp)
+test_confusion_matrix <- table(Predicted = preds.comp$class, Actual = test.comp$lineage)
+
+# Display test confusion matrix
+cat("\nTest Confusion Matrix:\n")
+print(test_confusion_matrix)
+
+#          Actual
+# Predicted  southern northern
+#   southern        9        0
+#   northern        0        7
+
+# Calculate test dataset accuracy
+test_accuracy <- sum(diag(test_confusion_matrix)) / sum(test_confusion_matrix)
+cat("\nTest Accuracy:", round(test_accuracy * 100, 2), "%\n")
+
+# The model correctly predicted species ID for 100% individuals in our test dataset 
+
+names(preds.comp)
+# This returns a list with 3 variables:
+  # class: The predicted class
+  # posterior: The posterior probability that an observation belongs to each class
+  # x: The linear discriminants
+
+# preds.comp$posterior # Look at posterior probabilities that an observation belongs to each class
+# preds.comp$class # Look at predicted class for the test data 
+# preds.comp$x # Pull linear discriminant values for the data
+
+# Extract probabilities for each class, merge dataframe
+probs.comp <- as.data.frame(preds.comp$posterior) # Get all posterior probabilities from the model
+probs.comp$model_lineage <- preds.comp$class # Pull predicted classes based on the model
+test.probs.comp <- cbind(test.comp, probs.comp) # Merge posteriors and model-determined class w/ our test.comp test data 
+levels(test.probs.comp$lineage) # check to make sure that Southern is still leveled before Northern
+```
+
+
+# PLOT LD1 OF MODEL CLASSIFICATION OUTPUT (HISTOGRAM)
+```{r}
+# A main result from this LDA analysis is that the model can classify Northerns and Southerns correctly in 100% of cases. 
+
+# Let's visualize this main result --- Plot one dimensional LD1 histogram:
+plot(model.comp)
+# I manually wrote this out and saved it as: LDA_Song_HistogramSeparation_BreedingOnlyData_2024-04-21.pdf 
+# Since we have only 2 groups we're separating into we there fore only have one LD dimension, so this will plot as a histogram
+# i.e., we cannot make a scatter plot (which wouldn't tell us much that a PCA hasn't already)
+## What this histogram tells us: Northerns and Southerns fall out cleanly. 
+
+
+# Let's make a nicer density histogram to show this same result.
+# First, bind the training dataset with predictions from the model: 
+lda_plot <- cbind(train.comp, predict(model.comp)$x)
+
+# Basic histogram of the first linear discriminant (LD1)
+# ggplot(lda_plot, aes(x = LD1, fill = lineage)) +
+#   geom_histogram(binwidth = 0.2, alpha = 0.7, position = "identity", color = "black") +
+#   labs(title = "Histogram of Linear Discriminant 1 (LD1)",
+#        x = "LD1", y = "Frequency") +
+#   theme_minimal() +
+#   scale_fill_manual(values = c("southern" = "#8B795E", "northern" = "#00C5CD"))
+
+# Basic version of this density histogram
+# hist <- ggplot(lda_plot, aes(x = LD1, fill = lineage, color = lineage)) +
+#   geom_density(alpha=0.3, linewidth=0.7) +
+#   geom_histogram(position = "identity", alpha = 0.5, bins = 30, aes(y = ..density..)) +
+#   labs(title = "Density Histogram for Two Groups", x = "LD1", y = "Density") +
+#   theme_minimal() +
+#   scale_fill_manual(values = c("southern" = "#8B795E", "northern" = "#00C5CD")) +
+#   scale_color_manual(values = c("southern" = "#8B795E", "northern" = "#00C5CD")) + 
+#  # scale_x_continuous(limits=c(-5.8,7.8), breaks = c(-6,-4,-2,0,2,4,6)) 
+# hist
+
+#bf7b00", "#5a7f00"
+
+
+# DENSITY HISTOGRAM OF LD1 RESULTS
+hist.LD1 <- (ggplot(lda_plot, aes(x=LD1, colour=lineage, fill=lineage)) +
+       geom_density(alpha=0.2, linewidth=0.0) +
+       geom_histogram(position = "identity", alpha = 0.5, bins=40, aes(y = ..density..)) +
+       scale_fill_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color fill
+       scale_color_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color outlines
+      #  scale_x_continuous(limits=c(-5.8,7.8), breaks = c(-6,-4,-2,0,2,4,6)) +
+      #  scale_y_continuous(limits=c(0,0.8), breaks = c(0,0.2,0.4,0.6,0.8)) +
+       labs(title="", x="LD1", y = "Density") +
+       ggtitle("B") + # Assign panel number/header
+       theme(plot.title.position = "plot", plot.title = element_text(face="bold")) + # "plot" specifies that you want title flush with y-axis
+       theme(
+          panel.border = element_blank(), # Remove panel border
+          panel.grid.major = element_blank(), # element_line(linewidth = 0.5, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.grid.minor = element_blank(),  # element_line(linewidth = 0.25, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.background = element_blank(), # Remove panel background
+          axis.line = element_line(colour = "black") # Add axis line
+             ) + 
+      theme(legend.title=element_text(face="bold")) + # Make legend title bold
+      theme(plot.margin = unit(c(0.0,right=0.0,0.0,0.0), "cm")) +  # top, right, bottom, left
+      theme(axis.text.y=element_text(size=12), axis.text.x=element_text(size=12), axis.title=element_text(size=12)))
+hist.LD1
+ggsave(hist.LD1, filename="/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/LDA_Bioacoustics_Northern-vs-Southern_LD1_DensityHistogram_2025-11-22.pdf", height=3, width=6, units="in")
+```
+
+
+# Bioacoustics posterior probability Plot of correct classification
+```{r}
+# Scatterplot: Probability of southern classification against probability of northern classification colored by analysis.lineage
+(ProbClassificationLDA_plot <- ggplot(subset(test.probs.comp), aes(x=southern, y=northern, colour=lineage)) + 
+  # geom_point(size=4, alpha=0.8) +
+   geom_jitter(size = 4, alpha = 0.8, width = 0.02, height = 0.02) + # I added a jitter so multiple points would be visible.
+   scale_color_manual(values = c("#bf7b00", "#5a7f00")) + 
+  theme_classic() + 
+  labs(x="Southern (posterior probability)",
+       y="Northern (posterior probability)") +
+  theme(legend.position = "none") +
+    geom_abline(intercept=0.0, slope=1, linetype=3) +
+    annotate(geom="text", x=0.55, y=0.95, label="80% training, 20% test\nModel accuracy = 100%", size=4.5) + # TAKE ACCURACY FROM ABOVE
+  ggtitle("C") + # Assign panel number/header
+  theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+         plot.title = element_text(face="bold")) + # This makes panel header bold 
+  theme(plot.margin = unit(c(0.0,right=0.2,0.0,0.2), "cm")) +  # top, right, bottom, left
+  theme(axis.text.y=element_text(size=12), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+ )
+ggsave(ProbClassificationLDA_plot, filename="LDA_Song_ProbabilityOfCorrectClassification_80Training20Test_2025-11-22.pdf", height=5, width=6, units="in")
+```
+
+
+
+
+# Now test our truly "unknown" birds
+
+# Create 'unknowns' dataset that we'll ID
+(Even though we really know what these are based on how they look in spectrograms)
+```{r}
+# Make unknown dataset - note that this includes all birds we didn't use before 
+# This is basically the difference between bio and comp.copy 
+unknown <- bio[!(bio$catalog_number %in% comp.copy$catalog_number),]
+# this is saying, take all birds from bio *not* present in our known, combined dataset 
+# 75 birds 
+
+# Note that this list contains ALL birds that were *not* in our breeding dataset
+
+# Confirm this distribution of points w/ a quick map 
+library(maptools)
+data(wrld_simpl)
+plot(wrld_simpl, xlim=c(-100,-10), ylim=c(-57,17), axes=TRUE, col="snow2") # plots gray world map
+box() # restore the box around the map
+points(unknown$longitude, unknown$latitude, col="black", pch=20, cex=1)
+# Basically what we're looking for here: points only from Peru and Bolivia because Ecuador, Argentina, and Chile (central) are all known
+
+
+# Make this subset match LDA format 
+# Standardize data 
+unknown$mean_min_freq_z <- standardize(unknown$mean_min_freq)
+unknown$mean_max_freq_z <- standardize(unknown$mean_max_freq)
+unknown$mean_duration_z <- standardize(unknown$mean_duration)
+
+unknown.sub <- subset(unknown, select = c(catalog_number,
+                                    country,
+                                    lineage,
+                                    mean_min_freq,
+                                    mean_min_freq_z,
+                                    mean_max_freq,
+                                    mean_max_freq_z,
+                                    mean_duration,
+                                    mean_duration_z
+                                        ) )
+
+# This is a complete dataframe with no NAs. That said, We  can't have any NA data to run PCA, so we'll use na.omit() here. 
+# Check the number of observations in the data frame before and after running this; if they differ, circle back to the top and revisit why. 
+unknown.sub <- na.omit(unknown.sub) # 74 observations 
+  # The bird that was dropped was ML 410550051 because it was classified as vocal type "unknown" and therefore doesn't have a lineage assignment
+```
+
+
+
+# Now use our LDA model to place these birds to lineage 
+Note that we putatively assigned a "lineage" ID based on visual appearance of spectrograms. Now we'll check those IDs. 
+```{r}
+set.seed(32567) # set seed 
+
+# Use our original model to predict species for 'unknown' birds
+predict.unknown <- predict(model.comp, unknown.sub)
+
+# Add predictions & posteriors into unknown.sub FIRST
+unknown.sub$predicted_lineage      <- predict.unknown$class
+unknown.sub$probability_southern   <- predict.unknown$posterior[, "southern"]
+unknown.sub$probability_northern   <- predict.unknown$posterior[, "northern"]
+
+# Assess model accuracy (using our "lineage" category as a "known")
+if ("lineage" %in% colnames(unknown.sub)) {
+  unknown.eval <- subset( # Keep only rows with both actual and predicted labels
+    unknown.sub,
+    !is.na(predicted_lineage) & !is.na(lineage)
+  )
+  confusion_matrix_unknown <- table(    # Generate confusion matrix
+    Predicted = unknown.eval$predicted_lineage,
+    Actual    = unknown.eval$lineage
+  )
+  accuracy_unknown <- sum(diag(confusion_matrix_unknown)) / sum(confusion_matrix_unknown) # Calculate accuracy
+  cat("\nPercent Misidentified:", round(accuracy_unknown * 100, 2), "%\n")
+  cat("\nConfusion Matrix for Unknown Data:\n")
+  print(confusion_matrix_unknown)
+} else {
+  cat("\nActual species labels are not available. Cannot calculate accuracy.\n")
+}
+
+# Unknown Data: 2.7 %
+# 
+# Confusion Matrix for Unknown Data:
+#           Actual
+# Predicted  northern southern
+#   southern        0       57
+#   northern       15        2
+
+# This means the model was 97.3% accurate in predicting unknowns.
+
+# Another way to check this: 
+# Analyze birds identified correctly vs incorrectly in a simple table
+putative.IDs <- predict(model.comp, unknown.sub)$class
+
+table.of.putative.IDs <- table(
+  Predicted = putative.IDs,
+  Actual    = unknown.sub$lineage   # use unknown.sub here
+)
+table.of.putative.IDs
+
+# Identify rows where actual lineage does not agree with model-predicted lineage
+mismatches <- subset(unknown.sub, !is.na(lineage) & lineage != predicted_lineage)
+mismatched_catalog_numbers <- mismatches$catalog_number
+
+cat("Catalog numbers of mismatched individuals:\n")
+print(mismatched_catalog_numbers)
+
+# Two misidentified birds:
+# 631524705, a Bolivia Cochabamba bird that Jessie recorded (Indiv 1 from Arani Villa Flores). This bird’s vocal data were calculated from only one vocalization, so it’s not as robust as other estimates. But, because Jessie heard it, because it is definitely a Southern by plumage, we left the ID as Southern. 
+# 631491349, a Bolivia Cochabamba bird that Jessie recorded (Indiv 26 from Arani foothills). This bird’s vocal data were calculated from only two vocalizations, so it’s not as robust as other estimates. But, because Jessie heard it, because it is definitely a Southern by plumage, we left the ID as Southern. 
+```
+
+
+
+**3)** Once IDed, combine all data and run analyses on all annual data together 
+
+We have identified that the spectrograms of Northerns and Southerns can be visually distinguished. 
+The two differ significantly in minimum frequency, max frequency, duration, and frequency bandwidth. 
+Then we used Linear Discriminant Analysis to distinguish the two, and the model had a 100% classification success. 
+We assigned putative IDs based on visual characteristics of spectrograms, and then we used our model to vet these IDs. The model agreed with visual classification of spectrograms in 98.72% of cases (all but one). Because I recorded this individual and know it's a Southern, leave it. 
+
+Now we'll merge our data to inspect differences. 
+
+# Merge data 
+```{R}
+# Really, in this particular instance, we don't have to merge data; we can go back to our original dataset since this is all correct
+alldat <- bio
+```
+
+
+# Create subsets, wrangle data, look at distributions (quick; this has already been explored)
+```{r}
+# make sure levels are set correctly
+str(alldat)
+alldat$lineage <- as.factor(alldat$lineage)
+alldat$lineage <- factor(alldat$lineage, levels = c("southern", "northern")) 
+levels(alldat$lineage)
+
+# Create subsets
+alldat.northern <- alldat[which(alldat$lineage == "northern"), ] # 39 indivduals
+alldat.southern <- alldat[which(alldat$lineage == "southern"), ] # 113 indivduals
+
+# Alldat Northern
+ggpairs_alldatN <- ggpairs(subset(alldat.northern, select = c(mean_min_freq, mean_max_freq, mean_duration, mean_bandwidth))); print(ggpairs_alldatN)
+
+# Assign rowIDs
+alldat.northern$rowID <- 1:nrow(alldat.northern)
+
+# NOW RE-RUN GGPAIRS
+
+# Northerns
+qqPlot(alldat.northern$mean_min_freq) # looks good
+qqPlot(alldat.northern$mean_max_freq) # looks good
+qqPlot(alldat.northern$mean_duration) # looks ok
+qqPlot(alldat.northern$mean_bandwidth) # looks good
+
+
+## ------------------
+
+# Alldat Southern
+ggpairs_alldatS <- ggpairs(subset(alldat.southern, select = c(mean_min_freq, mean_max_freq, mean_duration, mean_bandwidth))); print(ggpairs_alldatS)
+
+# Assign rowIDs
+alldat.southern$rowID <- 1:nrow(alldat.southern)
+
+# NOW RE-RUN GGPAIRS
+
+# Southerns
+qqPlot(alldat.southern$mean_min_freq) # looks good
+qqPlot(alldat.southern$mean_max_freq) # looks good
+qqPlot(alldat.southern$mean_duration) # 54 and 18 high top tail
+qqPlot(alldat.southern$mean_bandwidth) # looks good
+
+# Final datasets
+# 39 Northerns
+# 113 Southerns
+# 153 total observations
+```
+
+
+
+# Test for differences in all data together 
+```{r}
+# MIN FREQ
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(alldat, shapiro.test(mean_min_freq[lineage == "northern"])) # W = 0.98785, p-value = 0.9431
+with(alldat, shapiro.test(mean_min_freq[lineage == "southern"])) # W = 0.97765, p-value = 0.05511
+# Result: p-value >0.05, so data are *not* sig different from normal distribution; aka, they're distributed normally
+
+# Test for equal variances: 
+var.minfreq <- var.test(mean_min_freq ~ lineage, data=alldat); var.minfreq
+# Result: p-value for the F-test is <0.05 (our p = var.minfreq), so there IS a significant difference between the two variances. 
+
+# # Two sample t-test, paired 
+# t.minfreq <- t.test(mean_min_freq ~ lineage, data=alldat,
+#          #           paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+#                     var.equal=FALSE, # verified w/ F-test above
+#                     conf.level=0.95)
+# t.minfreq
+# t = 17.311, df = 61.761, p-value < 2.2e-16
+# #95% CI: 1956.136 2466.908
+
+# Since our minimum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+w.minfreq <- wilcox.test(mean_min_freq ~ lineage, data=alldat, 
+                #    paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+                    conf.int=TRUE,
+                    conf.level=0.95)
+w.minfreq
+# W = 24, p-value < 2.2e-16
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#               2.399676               4.568310
+
+
+# Minimum vocalization frequencies are 1.9x higher in Northerns than Southerns; finding significant (p < 2.2e-16, Wilcoxon rank sum test)
+
+## -----
+
+# MAX FREQ
+# Test for normality with Shapiro-Wilk test
+with(alldat, shapiro.test(mean_max_freq[lineage == "northern"])) # W = 0.9751, p-value = 0.5296
+with(alldat, shapiro.test(mean_max_freq[lineage == "southern"])) # W = 0.99089, p-value = 0.6581
+# Result: p-value <0.05, so data ARE sig different from normal distribution; aka, they're not distributed normally
+
+# Test for equal variances: 
+var.maxfreq <- var.test(mean_max_freq ~ lineage, data=alldat); var.maxfreq
+# Result: p-value for the F-test is >0.05 (our p = var.maxfreq), so there is NOT a significant difference between the two variances. 
+
+# # Two sample t-test, paired 
+t.maxfreq <- t.test(mean_max_freq ~ lineage, data=alldat,
+               #     paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+                    var.equal=FALSE, # verified w/ F-test above
+                    conf.level=0.95)
+t.maxfreq
+# t = -13.478, df = 66.013, p-value < 2.2e-16
+# #95% CI: -0.7304018 -0.5429997
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+# w.maxfreq <- wilcox.test(mean_max_freq ~ lineage, data=alldat, 
+#                     paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+#                     conf.int=TRUE,
+#                     conf.level=0.95)
+# w.maxfreq
+# W = 946, p-value = 2.39e-14
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#               4.941225               5.529669  
+
+# Maximum vocalization frequencies are 1.11x higher in Northerns than Southerns; finding significant (p = < 2.2e-16, t-test)
+
+## -----
+
+# PEAK FREQ
+# Test for normality with Shapiro-Wilk test
+with(alldat, shapiro.test(mean_peakfreq[lineage == "northern"])) # W = 0.98137, p-value = 0.7529
+with(alldat, shapiro.test(mean_peakfreq[lineage == "southern"])) # W = 0.99455, p-value = 0.9402
+# Result: p-value <0.05, so data ARE sig different from normal distribution; aka, they're not distributed normally
+
+# Test for equal variances: 
+var.maxfreq <- var.test(mean_peakfreq ~ lineage, data=alldat); var.maxfreq
+# Result: p-value for the F-test is >0.05 (our p = var.maxfreq), so there is NOT a significant difference between the two variances. 
+
+# # Two sample t-test, paired 
+t.maxfreq <- t.test(mean_peakfreq ~ lineage, data=alldat,
+               #     paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+                    var.equal=FALSE, # verified w/ F-test above
+                    conf.level=0.95)
+t.maxfreq
+#t = -12.548, df = 66.654, p-value < 2.2e-16
+# #95% CI: -0.7304018 -0.5429997
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+# w.maxfreq <- wilcox.test(mean_peakfreq ~ lineage, data=alldat, 
+#                     paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+#                     conf.int=TRUE,
+#                     conf.level=0.95)
+# w.maxfreq
+# W = 946, p-value = 2.39e-14
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#               4.74128               5.278330  
+
+# Peak song frequencies are 1.11x higher in Northerns than Southerns; finding significant (p = < 2.2e-16, t-test)
+
+## -----
+
+
+# Duration
+
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(alldat, shapiro.test(mean_duration[lineage == "northern"])) # W = 0.98222, p-value = 0.7828
+with(alldat, shapiro.test(mean_duration[lineage == "southern"])) # W = 0.92523, p-value = 8.792e-06
+# Result: p-value <0.05, so data ARE sig different from normal distribution; aka, they're not distributed normally
+
+# Test for equal variances: 
+var.duration <- var.test(mean_duration ~ lineage, data=alldat); var.duration
+# Result: p-value for the F-test is <0.05 (our p = var.maxfreq), so there IS a significant difference between the two variances. 
+
+# Two sample t-test, paired
+# t.duration <- t.test(mean_duration ~ lineage, data=alldat,
+#         #            paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+#                     var.equal=FALSE, # verified w/ F-test above
+#                     conf.level=0.95)
+# t.duration
+# # t = -9.3704, df = 26.618, p-value = 6.444e-10
+# #95% CI: -0.09513634 -0.06093792
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+w.duration <- wilcox.test(mean_duration ~ lineage, data=alldat, 
+             #       paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+                    conf.int=TRUE,
+                    conf.level=0.95)
+w.duration
+# W = 63, p-value < 2.2e-16
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#              0.06504233              0.1279261
+
+# Northern vocalization are 1.97x longer than Southern vocalizations; finding significant (p < 2.2e-16, Wilcoxon rank sum test)
+
+
+## -----
+
+# Bandwidth
+
+# Test for normality with Shapiro-Wilk test
+# Note: I much prefer to evaluate normality w/ histograms and qqplots
+with(alldat, shapiro.test(mean_bandwidth[lineage == "northern"])) # W = 0.99208, p-value = 0.9934
+with(alldat, shapiro.test(mean_bandwidth[lineage == "southern"])) # W = 0.98358, p-value = 0.1819
+# Result: p-value <0.05, so data ARE sig different from normal distribution; aka, they're not distributed normally
+
+# Test for equal variances: 
+var.bandwidth <- var.test(mean_bandwidth ~ lineage, data=alldat); var.bandwidth
+# Result: p-value for the F-test is <0.05 (our p = var.maxfreq), so there IS a significant difference between the two variances. 
+
+# Two sample t-test, paired
+# t.bandwidth <- t.test(mean_bandwidth ~ lineage, data=alldat,
+#        #             paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final)
+#                     var.equal=FALSE, # verified w/ F-test above
+#                     conf.level=0.95)
+# t.bandwidth
+# # t = 24.409, df = 42.639, p-value < 2.2e-16
+# #95% CI: 1335.919 1697.968
+
+# Since our maximum frequency data don't fulfill homogeneity of variances requirement, use nonparametric 
+# Wilcoxon rank sum (aka Mann-Whitney test)
+w.bandwidth <- wilcox.test(mean_bandwidth ~ lineage, data=alldat, 
+            #        paired=FALSE, # specifies dependence between two groups (i.e. measurements of initial and final) 
+                    conf.int=TRUE,
+                    conf.level=0.95)
+w.bandwidth
+# t = 20.842, df = 147.86, p-value < 2.2e-16
+
+# run t-test code to get sample means
+# sample estimates:
+# mean in group southern mean in group northern 
+#              2.5415486              0.9613592
+
+# Southerns vocalization have 2.63x greater frequency bandwidth than Northern vocalization; finding significant (p = < 2.2e-16, Wilcoxon rank sum test)
+```
+
+
+**Summary -- FULL ANNUAL DATA:** 
+- # Minimum vocal frequencies are 1.9x higher in Northerns than Southerns; finding significant (p < 2.2e-16, Wilcoxon rank sum test)
+aka min freq is 2x LOWER in Southerns
+-  # Maximum vocalization frequencies are 1.11x higher in Northerns than Southerns; finding significant (p = < 2.2e-16, t-test)
+- # Peak vocalization frequencies are 1.11x higher in Northerns than Southerns; finding significant (p = < 2.2e-16, t-test)
+- # Northern vocalizations are 1.97x longer than Southern vocalizations; finding significant (p < 2.2e-16, Wilcoxon rank sum test)
+Southern vocalizations are 1/2 the length 
+- Southerns vocalizations have 2.63x greater frequency bandwidth than Northern vocalizations; finding significant (p = < 2.2e-16, Wilcoxon rank sum test)
+
+
+# Box plots of vocal variable all data comparisons
+```{r}
+library(ggbeeswarm)
+library(ggsignif)
+
+# Box plot of min freq for vocalization 1
+(box.minfreq.ppt <- ggplot(subset(alldat, lineage %in% c("southern", "northern")), aes(x=lineage, y=mean_min_freq)) +
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # southern=brown; northern=teal
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(5.8), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        # coord_cartesian(ylim = c(30, 45)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Minimum Frequency\n(kHz)",
+             x="") +
+        ggtitle("A") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(box.minfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_Alldat_2025-011-22.pdf", height=5, width=5, units="in")
+ggsave(box.minfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_Alldat_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+
+###---
+
+# MAX FREQ
+(box.maxfreq.ppt <- ggplot(subset(alldat, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_max_freq)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(6.2), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+    #    coord_cartesian(ylim = c(30, 45)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Maximum Frequency\n(kHz)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("B") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(box.maxfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(box.maxfreq.ppt, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_Alldat_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+###---
+
+# DURATION
+(box.duration.ppt <- ggplot(subset(alldat, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_duration)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(0.19), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+    #    coord_cartesian(ylim = c(30, 45)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Duration\n(secs)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("C") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(box.duration.ppt, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(box.duration.ppt, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_Alldat_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+###---
+
+# Frequency Bandwidth 
+(box.bandwidth.ppt <- ggplot(subset(alldat, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_bandwidth)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(4.2), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+      #  coord_cartesian(ylim = c(4000, 16000)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Frequency Range\n(kHz)", 
+             x="") +
+      #  ggtitle("D") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(box.bandwidth.ppt, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(box.bandwidth.ppt, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_Alldat_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# PLOT MULTIPANEL FIG
+library(patchwork)
+# BioacousticBoxPlots_4Panel_ForTalks <- (box.minfreq.ppt + box.maxfreq.ppt + box.duration.ppt + box.bandwidth.ppt)
+# print(BioacousticBoxPlots_4Panel_ForTalks)
+# ggsave(BioacousticBoxPlots_4Panel_ForTalks, filename = "BioacousticsBoxPlots_NorthernVsSouthern_ForTalks_2024-11-11.pdf", bg="transparent", height=7.2, width=7.2, units="in")
+
+BioacousticBoxPlots_4Panel <- (box.minfreq.ppt + box.maxfreq.ppt + box.duration.ppt + box.bandwidth.ppt)
+print(BioacousticBoxPlots_4Panel)
+ggsave(BioacousticBoxPlots_4Panel, filename = "BioacousticsBoxPlots_NorthernVsSouthern_Multipanel_AllDat_2025-11-22.pdf", bg="transparent", height=8.2, width=8.2, units="in")
+```
+
+
+
+#### PCA
+
+# Standardize PCA inputs 
+```{R}
+# Function to standardize data
+standardize <- function(x) {
+  mu <- mean(x, na.rm=TRUE)
+  sigma <- sd(x, na.rm=TRUE)
+  y <- (x - mu)/sigma
+  return(y)
+}
+
+# Standardize data 
+alldat$mean_min_freq_z <- standardize(alldat$mean_min_freq)
+alldat$mean_max_freq_z <- standardize(alldat$mean_max_freq)
+alldat$mean_duration_z <- standardize(alldat$mean_duration)
+alldat$mean_bandwidth_z <- standardize(alldat$mean_bandwidth)
+alldat$mean_peakfreq_z <- standardize(alldat$mean_peakfreq)
+
+
+# Take a look at correlations between predictors - Correlation matrix 
+cor(alldat[,c("mean_min_freq_z", "mean_max_freq_z", "mean_peakfreq_z", "mean_duration_z", "mean_bandwidth_z")])
+
+#                  mean_min_freq_z mean_max_freq_z mean_peakfreq_z mean_duration_z mean_bandwidth_z
+# mean_min_freq_z        1.0000000       0.7158020       0.7033681       0.7161853       -0.9604026
+# mean_max_freq_z        0.7158020       1.0000000       0.9878086       0.7224093       -0.4928997
+# mean_peakfreq_z        0.7033681       0.9878086       1.0000000       0.6855077       -0.4822713
+# mean_duration_z        0.7161853       0.7224093       0.6855077       1.0000000       -0.6041332
+# mean_bandwidth_z      -0.9604026      -0.4928997      -0.4822713      -0.6041332        1.0000000
+```
+
+
+# SUBSET DATASET FOR PCA
+```{r}
+alldat.sub <- subset(alldat, select = c(catalog_number,
+                                    country,
+                                    lineage,
+                                    mean_min_freq,
+                                    mean_min_freq_z,
+                                    mean_max_freq,
+                                    mean_max_freq_z,
+                                    mean_duration,
+                                    mean_duration_z
+                           #         mean_bandwidth,
+                           #         mean_bandwidth_z # see notes above; excluding because secondary variable and correlated w/ min and max
+                                        ) )
+
+# This is a complete datafram with no NAs. That said, We  can't have any NA data to run PCA, so we'll use na.omit() here. 
+# Check the number of observations in the data frame before and after running this; if they differ, circle back to the top and revisit why. 
+alldat.sub <- na.omit(alldat.sub) # Still 152 observations 
+```
+
+
+
+# PRINCIPAL COMPONENTS ANALYSIS (PCA) 
+```{R}
+# Subset by just variables we'll use need for PCA
+# Basically: We want to drop 'locality' since many localities are missing data and this will cause problems 
+rownames(alldat.sub) <- alldat.sub$catalog_number
+alldat.sub.pca <- alldat.sub[, c("mean_min_freq_z", "mean_max_freq_z", "mean_duration_z")]
+
+#  Relevel factors so order shows up as you want in plots 
+str(alldat.sub$lineage)
+alldat.sub$lineage <- factor(alldat.sub$lineage, levels = c("southern", "northern")) 
+levels(alldat.sub$lineage)
+
+str(alldat.sub$country)
+alldat.sub$country <- as.factor(alldat.sub$country)
+alldat.sub$country <- factor(alldat.sub$country, levels = c("Argentina", "Bolivia", "Chile", "Ecuador", "Peru")) 
+levels(alldat.sub$country)
+
+# Make vectors to plot ellipses with ggbiplot
+country <- alldat.sub[, "country"]
+country <- factor(country, levels = c("Argentina", "Bolivia", "Chile", "Ecuador", "Peru")) 
+lineage <- alldat.sub[, "lineage"]
+lineage <- factor(lineage, levels = c("southern", "northern")) 
+
+
+# RUN PCA 
+alldat.sub.pca.output <- prcomp(alldat.sub.pca, center=TRUE, scale.=TRUE) 
+
+print(alldat.sub.pca.output) # Get PCA loadings
+# also achieved w/ pg.pca$rotation
+
+summary(alldat.sub.pca.output) # Get importance of components 
+
+# Importance of components:
+#                           PC1     PC2     PC3
+# Standard deviation     1.5600 0.53623 0.52812
+# Proportion of Variance 0.8112 0.09585 0.09297
+# Cumulative Proportion  0.8112 0.90703 1.00000
+
+# First two PCs explain 90.7% of variation.
+
+# visualize how much variance is explained by top PCs
+screeplot(alldat.sub.pca.output) # PC1 basically separates the two species
+plot(alldat.sub.pca.output, type = "l")
+biplot(alldat.sub.pca.output)
+autoplot(alldat.sub.pca.output)
+```
+
+
+
+# Align signs of alldat PCA with breeding season only PCA 
+Somehow my signs of my alldat PCA are flipped/reversed from my breeding only PCA 
+More on this here: https://stackoverflow.com/questions/65288009/pca-can-i-reverse-the-axis-of-the-first-principal-component-in-r. 
+I want signs to be aligned so axes are consistent between PCAs, which makes for better/easier interpretation, especially when these are in a multi-panel figure together. 
+```{r}
+# The breeding season PCA is the orientation we want (though in this case it really doesn't matter)
+# So let's flip PC2 to match orientation of PC1
+
+# Breeding season PCA = comp.sub.pca.output
+# all data PCA = alldat.sub.pca.output
+
+# Function to align the signs of PCA2 with PCA1
+align_pca_signs <- function(comp.sub.pca.output, alldat.sub.pca.output) {
+  rotation1 <- comp.sub.pca.output$rotation
+  rotation2 <- alldat.sub.pca.output$rotation
+  x2 <- alldat.sub.pca.output$x
+  
+  for (i in 1:ncol(rotation1)) {
+    # Calculate dot product to determine if they are in the same direction
+    dot_product <- sum(rotation1[, i] * rotation2[, i])
+    
+    # If dot product is negative, flip the signs of the components in PCA2
+    if (dot_product < 0) {
+      rotation2[, i] <- -rotation2[, i]
+      x2[, i] <- -x2[, i]
+    }
+  }
+  
+  # Update PCA2 with the aligned components
+  alldat.sub.pca.output$rotation <- rotation2
+  alldat.sub.pca.output$x <- x2
+  
+  return(alldat.sub.pca.output)
+}
+
+# Apply the function to align PCA2 with PCA1
+aligned.alldat.sub.pca.output <- align_pca_signs(comp.sub.pca.output, alldat.sub.pca.output)
+
+# Print aligned PCA results
+print(comp.sub.pca.output)
+print(aligned.alldat.sub.pca.output)
+```
+
+
+
+# Plot the outputs
+
+# Quick plot, no ellipses
+```{r}
+library(ggbiplot)
+
+# No ellipses - just a way to get a quick sense of how data look
+(quick.allpca.plot <- ggbiplot::ggbiplot(aligned.alldat.sub.pca.output, obs.scale = 1, var.scale = 1, ellipse = TRUE, circle = FALSE, 
+                        var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(quick.allpca.plot)
+# ggsave(song1.allpca.plot, filename="Patagona_NorthernVersusSouthern_RangewideBioClimPCA_All19BioClimVars_2023-11-18.pdf", height=7, width=9, units="in")
+```
+
+
+# PCA plot w/ ellipses by lineage 
+```{r}
+(allpca.plot.ellipselineage <- ggbiplot::ggbiplot(aligned.alldat.sub.pca.output, obs.scale = 1, group=lineage, var.scale = 1, ellipse = TRUE, circle = FALSE, 
+                        var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        scale_color_manual(name="lineage", values=c("#bf7b00", "#5a7f00")) +
+        geom_point(aes(colour=lineage), size = 3) +
+        #PC1 arrows and labels 
+        # geom_segment(aes(x=2.5, y=-2.5, xend=3.5, yend=-2.5), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=2.8, y=-2.3, label="smaller birds", size=3) + # bottom label, right
+        # geom_segment(aes(x=-2.5, y=-2.5, xend=-3.5, yend=-2.5), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=-2.8, y=-2.3, label="larger birds", size=3) + # bottom label, left
+        # # PC2 arrows and labels
+        # geom_segment(aes(x=-3.5, y=-1, xend=-3.5, yend=-2.0), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=-2.85, y=-1.5, label="large bill,\nsmall wings & tail", size=3) + # left label bottom
+        # geom_segment(aes(x=-3.5, y=1, xend=-3.5, yend=1.8), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=-2.85, y=1.5, label="small bill,\nlarge wings & tail", size=3) + # left label top
+        # g <- g + scale_color_discrete(name = '')
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(allpca.plot.ellipselineage)
+#ggsave(allpca.plot.ellipselineage, filename="Patagona_Bioacoustics_PCA_AllDat_NorthernVersusSouthern_2025-04-21.pdf", height=7, width=9, units="in")
+```
+
+
+# Ellipses by country 
+```{r}
+# COUNTRY COLORS 
+# Argentina (mustard): #F2C900
+# Peru (light dull blue): #99B5BC
+# Ecuador (navy): #196C91
+# Chile (red): #FF0000
+# "darkorchid2",  - purple to use for Bolivia
+
+# Ellipses by country -- 
+# Note that ellipses are going to look like they're "pulled" because we expect some N Chile birds to fall out w/ each N and S
+# So Chile will look stretched. 
+
+# order of countries goes: Argentina, Bolivia, Chile, Ecuador, Peru
+
+(allpca.plot.country <- ggbiplot::ggbiplot(aligned.alldat.sub.pca.output, obs.scale = 1, group=country, var.scale = 1, ellipse = TRUE, circle = FALSE, 
+                        var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        scale_color_manual(name="country", values=c("#F2C900", "purple", "#FF0000", "#196C91", "#99B5BC")) +
+        geom_point(aes(colour=country), size = 3) +
+        #PC1 arrows and labels
+        # geom_segment(aes(x=2.5, y=-2.5, xend=3.5, yend=-2.5), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=2.8, y=-2.3, label="smaller birds", size=3) + # bottom label, right
+        # geom_segment(aes(x=-2.5, y=-2.5, xend=-3.5, yend=-2.5), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=-2.8, y=-2.3, label="larger birds", size=3) + # bottom label, left
+        # # PC2 arrows and labels
+        # geom_segment(aes(x=-3.5, y=-1, xend=-3.5, yend=-2.0), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=-2.85, y=-1.5, label="large bill,\nsmall wings & tail", size=3) + # left label bottom
+        # geom_segment(aes(x=-3.5, y=1, xend=-3.5, yend=1.8), arrow = arrow(length = unit(0.2, "cm"), type="closed")) +
+        # annotate(geom="text", x=-2.85, y=1.5, label="small bill,\nlarge wings & tail", size=3) + # left label top
+        # g <- g + scale_color_discrete(name = '')
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(allpca.plot.country)
+#ggsave(allpca.plot.country, filename="Patagona_Bioacoustics_AllDat_PCA_NorthernVersusSouthern_ColorByCountry_2025-04-21.pdf", height=7, width=9, units="in")
+```
+
+
+# Points by country, ellipses by species
+```{r}
+# COUNTRY COLORS 
+# Argentina (mustard): #F2C900
+# Peru (light dull blue): #99B5BC
+# Ecuador (navy): #196C91
+# Chile (red): #FF0000
+# "darkorchid2",  - purple to use for Bolivia
+
+# Bryce new colors:
+# southern: bf7b00
+# northern: 5a7f00
+
+library(ggnewscale)
+
+(alldata.pca.plot.country.ellipseNS <- ggbiplot::ggbiplot(aligned.alldat.sub.pca.output, obs.scale = 1, var.scale = 1, group=country, ellipse = FALSE, circle = TRUE, var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+      stat_ellipse(aes(group = lineage, color = lineage), type = "norm", size = 1) +    
+      scale_color_manual(name="lineage", values=c("southern"="darkgray", "northern"="darkgray")) + # Jessie old colors (brown and teal)
+      new_scale_color() + # Add new scale for points
+      geom_point(aes(colour=country), size=3) +
+      scale_color_manual(name="country", values=c("Argentina"="#F2C900","Bolivia"="purple","Chile"="#FF0000","Ecuador"="#196C91","Peru"="#99B5BC")) +
+    #    scale_color_manual(name="lineage", values=c("southern"="#8B795E", "northern"="#00C5CD")) + # Jessie old colors (brown and teal)
+        theme(legend.direction = 'vertical', legend.position = 'right') + 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_blank(), 
+             axis.line = element_line(),
+             panel.background = element_blank()) + 
+        theme(axis.text=element_text(size=11, face="bold")))
+print(alldata.pca.plot.country.ellipseNS)
+ggsave(alldata.pca.plot.country.ellipseNS, filename="Patagona_Bioacoustics_AllDat_PCA_NorthernVersusSouthern_ColorByCountry_EllipsesBySpecies_2025-11-22.pdf", height=7, width=9, units="in")
+```
+
+
+
+# MORPHO LDA
+Now, as a complementary effort, we want to be able to plot morphological LDA accuracy against bioacoustic data accuracy to demonstrate how much better bioacoustics is at identifying the two species. Here is a quick pass at this using Williamson et al. 2024 *PNAS* morphological data, later updated in Williamson et al. 2025, *Zoological Journal of the Linnean Society*.
+
+# Read in data (exported from Patagona_morpho_analysis.Rmd)
+```{r}
+morpho <- read.csv("/Users/Jessie/MSBbirds Dropbox/Jessie Williamson/Rdirectory/Patagona_taxonomy/WilliamsonEtAl2025_ZJLS_Patagona_taxonomy_morpho_git.csv", na.strings = c("", "NA"), stringsAsFactors = TRUE)
+# 448 records
+
+morpho <- morpho[-which(morpho$analysis.lineage =="undetermined"),] # 441 records 
+
+morpho.females.subset <- morpho[which(morpho$sex =="female"),] # 191 records 
+morpho.males.subset <- morpho[which(morpho$sex =="male"),] # 192 records
+
+morpho.females.subset.nona <- na.omit(morpho.females.subset) # 166 records 
+morpho.males.subset.nona <- na.omit(morpho.males.subset) # 161 records
+```
+
+
+# LDA with female morpho data
+*Note that I'm not using males here 
+```{r}
+# Let's use our .nona data from PCA above to make things simple; we'll work w/ standardized data and will make a copy so we don't mess things up 
+fem.dat.lda <- morpho.females.subset.nona
+scatterplotMatrix(fem.dat.lda[9:11])
+
+# check levels and order 
+levels(fem.dat.lda$analysis.lineage) # northern is before southern, so let's flip
+fem.dat.lda$analysis.lineage <- factor(fem.dat.lda$analysis.lineage, levels = c("southern", "northern")) # relevel factor order, which got mixed (hybrid in there)
+
+# Check structure
+str(fem.dat.lda) # good, all numeric
+fem.dat.lda$wing <- as.numeric(fem.dat.lda$wing) # make wing numeric
+
+# Scale morpho predictors
+fem.dat.lda[, c("bill", "wing", "tail")] <- scale(fem.dat.lda[, c("bill", "wing", "tail")])
+
+
+## Take a look at the data, though we largely already have
+# This can help us identify variables that can help separate out species 
+library(psych)
+pairs.panels(fem.dat.lda[9:11],
+             method="pearson", # Pearson correlation coefficient
+             hist.col = "blue", # color histogram
+             density=TRUE, # show density plots
+             gap = 0,
+             ellipses=TRUE,
+            # ci=TRUE, # Adds 95% confidence intervals
+          #   lm=TRUE,
+             bg = c("#bf7b00", "#5a7f00")[fem.dat.lda$analysis.lineage],
+             pch = 21)
+
+# Top right-hand corner gives us correlation coefficients
+# Bottom left scatter plots show separation of the data with different combinations of variables 
+# This confirms what we know: there is a lot of overlap and it can be super hard to separate the two species. 
+```
+
+
+# 1) Create LDA training and test datasets 
+```{r}
+set.seed(32567) # set seed 
+
+# Use 80% of dataset as training set and remaining 20% as testing set
+# Calculate the exact number of rows for training
+train.size.fem <- floor(0.8 * nrow(fem.dat.lda))
+
+# Randomly select row indices for training (no replacement)
+train.indices.fem <- sample(seq_len(nrow(fem.dat.lda)), size = train.size.fem, replace = FALSE)
+  # Make sure replace=FALSE! Otherwise we may select the same data with replacement, which isn't best practice for LDA. 
+
+# Split the data
+train.fem <- fem.dat.lda[train.indices.fem, ]
+test.fem <- fem.dat.lda[-train.indices.fem, ]
+
+# Check the split
+cat("Training set size, females:", nrow(train.fem), "\n")
+cat("Test set size, females:", nrow(test.fem), "\n")
+
+# Training set size, females: 132 
+# Test set size, females: 34
+```
+
+
+# 2) FIT LDA MODEL and evaluate model performance on training data
+```{r}
+library(MASS)
+
+# Make response variable (lineage) is a factor
+str(train.fem)
+train.fem$analysis.lineage <- as.factor(train.fem$analysis.lineage)
+
+# Fit the LDA model using specified variables
+model.fem <- lda(analysis.lineage ~ bill + wing + tail, data=train.fem)
+print(model.fem) 
+
+# Prior probabilities of groups:
+#  southern  northern 
+# 0.4015152 0.5984848 
+# 
+# Group means:
+#                bill       wing        tail
+# southern -0.4486217 -0.3034412 -0.07877757
+# northern  0.3331754  0.1874675  0.01090692
+# 
+# Coefficients of linear discriminants:
+#             LD1
+# bill  1.0564780
+# wing  0.3235254
+# tail -0.4218597
+
+
+## EVALUATE MODEL PERFORMANCE ON TRAINING DATA
+# Predict on training data
+train_predictions_fem <- predict(model.fem, train.fem)
+train_confusion_matrix_fem <- table(Predicted = train_predictions_fem$class, Actual = train.fem$analysis.lineage)
+
+# Display confusion matrix and accuracy
+cat("\nTraining Confusion Matrix, females:\n")
+print(train_confusion_matrix_fem)
+#           Actual
+# Predicted  southern northern
+#   southern       27       12
+#   northern       26       67
+
+train_accuracy_fem <- sum(diag(train_confusion_matrix_fem)) / sum(train_confusion_matrix_fem)
+cat("\nTraining Accuracy, female morpho:", round(train_accuracy_fem * 100, 2), "%\n")
+#Training Accuracy, female morpho: 71.21 %
+```
+
+
+# 3) MAKE PREDICTIONS AND MERGE DATA FOR PLOTTING
+```{r}
+# Predict on test data
+preds.fem <- predict(model.fem, test.fem)
+test_confusion_matrix_fem <- table(Predicted = preds.fem$class, Actual = test.fem$analysis.lineage)
+
+# Display test confusion matrix
+cat("\nTest Confusion Matrix, female morpho:\n")
+print(test_confusion_matrix_fem)
+
+#           Actual
+# Predicted  southern northern
+#   southern        7        4
+#   northern        6       17
+
+# Calculate test dataset accuracy
+test_accuracy_fem <- sum(diag(test_confusion_matrix_fem)) / sum(test_confusion_matrix_fem)
+cat("\nTest Accuracy, female morpho:", round(test_accuracy_fem * 100, 2), "%\n")
+# The model correctly predicted female species ID for 70.59% individuals in our test dataset (when 80% training data were used)
+
+names(preds.fem)
+# This returns a list with 3 variables:
+  # class: The predicted class
+  # posterior: The posterior probability that an observation belongs to each class
+  # x: The linear discriminants
+
+# preds.comp$posterior # Look at posterior probabilities that an observation belongs to each class
+# preds.comp$class # Look at predicted class for the test data 
+# preds.comp$x # Pull linear discriminant values for the data
+
+# Extract probabilities for each class, merge dataframe
+probs.fem <- as.data.frame(preds.fem$posterior) # Get all posterior probabilities from the model
+probs.fem$model_lineage <- preds.fem$class # Pull predicted classes based on the model
+test.probs.fem <- cbind(test.fem, probs.fem) # Merge posteriors and model-determined class w/ our test.comp test data 
+levels(test.probs.fem$analysis.lineage) # check to make sure that Southern is still leveled before Northern
+```
+
+
+# PLOT LD1 OF MODEL CLASSIFICATION OUTPUT (HISTOGRAM)
+```{r}
+# A main result from this LDA analysis is that the model can classify Northerns and Southerns correctly in 100% of cases. 
+
+# Let's visualize this main result --- Plot one dimensional LD1 histogram:
+plot(model.fem)
+# I manually wrote this out and saved it as: LDA_Song_HistogramSeparation_BreedingOnlyData_2024-11-11.pdf 
+# Since we have only 2 groups we're separating into we there fore only have one LD dimension, so this will plot as a histogram
+# i.e., we cannot make a scatter plot (which wouldn't tell us much that a PCA hasn't already)
+## What this histogram tells us: Northerns and Southerns fall out cleanly. 
+
+# Let's make a nicer density histogram to show this same result.
+
+# First, bind the training dataset with predictions from the model: 
+lda_plot_fem_morpho <- cbind(train.fem, predict(model.fem)$x)
+
+# DENSITY HISTOGRAM OF LD1 RESULTS
+hist.LD1.fem.morpho <- (ggplot(lda_plot_fem_morpho, aes(x=LD1, colour=analysis.lineage, fill=analysis.lineage)) +
+       geom_density(alpha=0.2, linewidth=0.0) +
+       geom_histogram(position = "identity", alpha = 0.5, bins=40, aes(y = ..density..)) +
+       scale_fill_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color fill
+       scale_color_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color outlines
+      #  scale_x_continuous(limits=c(-5.8,7.8), breaks = c(-6,-4,-2,0,2,4,6)) +
+      #  scale_y_continuous(limits=c(0,0.8), breaks = c(0,0.2,0.4,0.6,0.8)) +
+       labs(title="", x="LD1", y = "Density") +
+       ggtitle("B") + # Assign panel number/header
+       theme(plot.title.position = "plot", plot.title = element_text(face="bold")) + # "plot" specifies that you want title flush with y-axis
+       theme(
+          panel.border = element_blank(), # Remove panel border
+          panel.grid.major = element_blank(), # element_line(linewidth = 0.5, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.grid.minor = element_blank(),  # element_line(linewidth = 0.25, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.background = element_blank(), # Remove panel background
+          axis.line = element_line(colour = "black") # Add axis line
+             ) + 
+      theme(legend.title=element_text(face="bold")) + # Make legend title bold
+      theme(plot.margin = unit(c(0.0,right=0.0,0.0,0.0), "cm")) +  # top, right, bottom, left
+      theme(axis.text.y=element_text(size=12), axis.text.x=element_text(size=12), axis.title=element_text(size=12)))
+hist.LD1.fem.morpho
+#ggsave(hist.LD1, filename="/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/LDA_Bioacoustics_Northern-vs-Southern_LD1_DensityHistogram_2024-11-18.pdf", height=6, width=8, units="in")
+ggsave(hist.LD1.fem.morpho, filename="/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/LDA_Morphology_Northern-vs-Southern_LD1_DensityHistogram_2025-11-22.pdf", height=3, width=6, units="in")
+```
+
+
+# Morphological posterior probability Plot of correct classification (for females)
+```{r}
+# Scatterplot: Probability of southern classification against probability of northern classification colored by analysis.lineage
+(ProbClassificationLDA_plot_fem_morpho <- ggplot(subset(test.probs.fem), aes(x=southern, y=northern, colour=analysis.lineage)) + 
+   geom_point(size=4, alpha=0.8) +
+#   geom_jitter(size = 4, alpha = 0.8, width = 0.02, height = 0.02) + # I added a jitter so multiple points would be visible.
+   scale_color_manual(values = c("#bf7b00", "#5a7f00")) + 
+  theme_classic() + 
+  labs(x="Southern (posterior probability)",
+       y="Northern (posterior probability)") +
+  scale_y_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  scale_x_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  theme(legend.position = "none") +
+    geom_abline(intercept=0.0, slope=1, linetype=3) +
+    annotate(geom="text", x=0.55, y=0.95, label="80% training, 20% test\nModel accuracy = 70.59%", size=4.5) + # TAKE ACCURACY FROM ABOVE
+  ggtitle("C") + # Assign panel number/header
+  theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+         plot.title = element_text(face="bold")) + # This makes panel header bold 
+  theme(plot.margin = unit(c(0.0,right=0.2,0.0,0.2), "cm")) +  # top, right, bottom, left
+  theme(axis.text.y=element_text(size=12), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+ )
+ggsave(ProbClassificationLDA_plot_fem_morpho, filename="LDA_Morphology_Females_ProbabilityOfCorrectClassification_80Training20Test_2025-11-22.pdf", height=5, width=6, units="in")
+```
+
+
+
+# LDA with male morpho data
+*Note that I'm not using males here 
+```{r}
+# Let's use our .nona data from PCA above to make things simple; we'll work w/ standardized data and will make a copy so we don't mess things up 
+male.dat.lda <- morpho.males.subset.nona
+scatterplotMatrix(male.dat.lda[9:11])
+
+# check levels and order 
+levels(male.dat.lda$analysis.lineage) # northern is before southern, so let's flip
+male.dat.lda$analysis.lineage <- factor(male.dat.lda$analysis.lineage, levels = c("southern", "northern")) # relevel factor order, which got mixed (hybrid in there)
+
+# Check structure
+str(male.dat.lda) # good, all numeric
+male.dat.lda$wing <- as.numeric(male.dat.lda$wing) # make wing numeric
+male.dat.lda$tail <- as.numeric(male.dat.lda$tail) # make wing numeric
+
+# Scale morpho predictors
+male.dat.lda[, c("bill", "wing", "tail")] <- scale(male.dat.lda[, c("bill", "wing", "tail")])
+
+
+## Take a look at the data, though we largely already have
+# This can help us identify variables that can help separate out species 
+library(psych)
+pairs.panels(male.dat.lda[9:11],
+             method="pearson", # Pearson correlation coefficient
+             hist.col = "blue", # color histogram
+             density=TRUE, # show density plots
+             gap = 0,
+             ellipses=TRUE,
+            # ci=TRUE, # Adds 95% confidence intervals
+          #   lm=TRUE,
+             bg = c("#bf7b00", "#5a7f00")[male.dat.lda$analysis.lineage],
+             pch = 21)
+
+# Top right-hand corner gives us correlation coefficients
+# Bottom left scatter plots show separation of the data with different combinations of variables 
+# This confirms what we know: there is a lot of overlap and it can be super hard to separate the two species. 
+```
+
+
+# 1) Create LDA training and test datasets 
+```{r}
+set.seed(32567) # set seed 
+
+# Use 80% of dataset as training set and remaining 20% as testing set
+# Calculate the exact number of rows for training
+train.size.male <- floor(0.8 * nrow(male.dat.lda))
+
+# Randomly select row indices for training (no replacement)
+train.indices.male <- sample(seq_len(nrow(male.dat.lda)), size = train.size.male, replace = FALSE)
+  # Make sure replace=FALSE! Otherwise we may select the same data with replacement, which isn't best practice for LDA. 
+
+# Split the data
+train.male <- male.dat.lda[train.indices.male, ]
+test.male <- male.dat.lda[-train.indices.male, ]
+
+# Check the split
+cat("Training set size, males:", nrow(train.male), "\n")
+cat("Test set size, males:", nrow(test.male), "\n")
+
+# Training set size, males: 128
+# Test set size, males: 33
+```
+
+
+
+# 2) FIT LDA MODEL and evaluate model performance on training data
+```{r}
+library(MASS)
+
+# Make response variable (lineage) is a factor
+str(train.male)
+train.male$analysis.lineage <- as.factor(train.male$analysis.lineage)
+
+# Fit the LDA model using specified variables
+model.male <- lda(analysis.lineage ~ bill + wing + tail, data=train.male)
+print(model.male) 
+
+# Prior probabilities of groups:
+# southern northern 
+#  0.40625  0.59375 
+# 
+# Group means:
+#                bill       wing       tail
+# southern -0.6357194 -0.5538229 0.05436400
+# northern  0.3872567  0.3817134 0.01132625
+# 
+# Coefficients of linear discriminants:
+#             LD1
+# bill  0.8018139
+# wing  0.6600141
+# tail -0.6401126
+
+
+## EVALUATE MODEL PERFORMANCE ON TRAINING DATA
+# Predict on training data
+train_predictions_male <- predict(model.male, train.male)
+train_confusion_matrix_male <- table(Predicted = train_predictions_male$class, Actual = train.male$analysis.lineage)
+
+# Display confusion matrix and accuracy
+cat("\nTraining Confusion Matrix, male morpho:\n")
+print(train_confusion_matrix_male)
+#          Actual
+# Predicted  southern northern
+#   southern       35        9
+#   northern       17       67
+
+train_accuracy_male <- sum(diag(train_confusion_matrix_male)) / sum(train_confusion_matrix_male)
+cat("\nTraining Accuracy, male morpho:", round(train_accuracy_male * 100, 2), "%\n")
+# Training Accuracy, male morpho: 79.69 %
+```
+
+
+
+# 3) MAKE PREDICTIONS AND MERGE DATA FOR PLOTTING
+```{r}
+# Predict on test data
+preds.male <- predict(model.male, test.male)
+test_confusion_matrix_male <- table(Predicted = preds.male$class, Actual = test.male$analysis.lineage)
+
+# Display test confusion matrix
+cat("\nTest Confusion Matrix, male morpho:\n")
+print(test_confusion_matrix_male)
+#           Actual
+# Predicted  southern northern
+#   southern        8        3
+#   northern        7       15
+
+# Calculate test dataset accuracy
+test_accuracy_male <- sum(diag(test_confusion_matrix_male)) / sum(test_confusion_matrix_male)
+cat("\nTest Accuracy, male morpho:", round(test_accuracy_male * 100, 2), "%\n")
+# The model correctly predicted female species ID for 69.7% individuals in our test dataset (when 80% training data were used)
+
+# Extract probabilities for each class, merge dataframe
+probs.male <- as.data.frame(preds.male$posterior) # Get all posterior probabilities from the model
+probs.male$model_lineage <- preds.male$class # Pull predicted classes based on the model
+test.probs.male <- cbind(test.male, probs.male) # Merge posteriors and model-determined class w/ our test.comp test data 
+levels(test.probs.male$analysis.lineage) # check to make sure that Southern is still leveled before Northern
+```
+
+
+# PLOT LD1 OF MODEL CLASSIFICATION OUTPUT (HISTOGRAM)
+```{r}
+# Let's visualize this main result --- Plot one dimensional LD1 histogram:
+plot(model.male)
+# Since we have only 2 groups we're separating into we there fore only have one LD dimension, so this will plot as a histogram
+# i.e., we cannot make a scatter plot (which wouldn't tell us much that a PCA hasn't already)
+## What this histogram tells us: Northerns and Southerns *do not* fall out cleanly. 
+
+# Let's make a nicer density histogram to show this same result.
+
+# First, bind the training dataset with predictions from the model: 
+lda_plot_male_morpho <- cbind(train.male, predict(model.male)$x)
+
+# DENSITY HISTOGRAM OF LD1 RESULTS
+hist.LD1.male.morpho <- (ggplot(lda_plot_male_morpho, aes(x=LD1, colour=analysis.lineage, fill=analysis.lineage)) +
+       geom_density(alpha=0.2, linewidth=0.0) +
+       geom_histogram(position = "identity", alpha = 0.5, bins=40, aes(y = ..density..)) +
+       scale_fill_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color fill
+       scale_color_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color outlines
+      #  scale_x_continuous(limits=c(-5.8,7.8), breaks = c(-6,-4,-2,0,2,4,6)) +
+      #  scale_y_continuous(limits=c(0,0.8), breaks = c(0,0.2,0.4,0.6,0.8)) +
+       labs(title="", x="LD1", y = "Density") +
+       ggtitle("B") + # Assign panel number/header
+       theme(plot.title.position = "plot", plot.title = element_text(face="bold")) + # "plot" specifies that you want title flush with y-axis
+       theme(
+          panel.border = element_blank(), # Remove panel border
+          panel.grid.major = element_blank(), # element_line(linewidth = 0.5, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.grid.minor = element_blank(),  # element_line(linewidth = 0.25, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.background = element_blank(), # Remove panel background
+          axis.line = element_line(colour = "black") # Add axis line
+             ) + 
+      theme(legend.title=element_text(face="bold")) + # Make legend title bold
+      theme(plot.margin = unit(c(0.0,right=0.0,0.0,0.0), "cm")) +  # top, right, bottom, left
+      theme(axis.text.y=element_text(size=12), axis.text.x=element_text(size=12), axis.title=element_text(size=12)))
+hist.LD1.male.morpho
+#ggsave(hist.LD1, filename="/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/LDA_Bioacoustics_Northern-vs-Southern_LD1_DensityHistogram_2024-11-18.pdf", height=6, width=8, units="in")
+ggsave(hist.LD1.male.morpho, filename="/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona/LDA_Morphology_Males_Northern-vs-Southern_LD1_DensityHistogram_2025-11-22.pdf", height=3, width=6, units="in")
+```
+
+
+# Morphological posterior probability Plot of correct classification (for males)
+```{r}
+# Scatterplot: Probability of southern classification against probability of northern classification colored by analysis.lineage
+(ProbClassificationLDA_plot_male_morpho <- ggplot(subset(test.probs.male), aes(x=southern, y=northern, colour=analysis.lineage)) + 
+   geom_point(size=4, alpha=0.8) +
+   scale_color_manual(values = c("#bf7b00", "#5a7f00")) + 
+  theme_classic() + 
+  labs(x="Southern (posterior probability)",
+       y="Northern (posterior probability)") +
+  scale_y_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  scale_x_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  theme(legend.position = "none") +
+    geom_abline(intercept=0.0, slope=1, linetype=3) +
+    annotate(geom="text", x=0.55, y=0.95, label="80% training, 20% test\nModel accuracy = 69.7%", size=4.5) + # TAKE ACCURACY FROM ABOVE
+  ggtitle("C") + # Assign panel number/header
+  theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+         plot.title = element_text(face="bold")) + # This makes panel header bold 
+  theme(plot.margin = unit(c(0.0,right=0.2,0.0,0.2), "cm")) +  # top, right, bottom, left
+  theme(axis.text.y=element_text(size=12), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+ )
+ggsave(ProbClassificationLDA_plot_male_morpho, filename="LDA_Morphology_Males_ProbabilityOfCorrectClassification_80Training20Test_2025-11-22.pdf", height=5, width=6, units="in")
+```
+
+
+
+---
+
+### PLOTS ####
+
+
+# Figure 2: Boxplots of vocal differences showing full annual range data (main panels) and breeding range only data (insets) 
+```{r}
+library(ggbeeswarm)
+library(ggsignif)
+
+# Old colors, brown and teal: "#8B795E", "#00C5CD"
+# Bryce new colors, orange and green: "southern"=#bf7b00", "northern" = "#5a7f00"
+
+# Box plot of min freq
+(fig2.minfreq.main <- ggplot(subset(alldat, lineage %in% c("southern", "northern")), aes(x=lineage, y=mean_min_freq)) +
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # southern=brown; northern=teal
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(5.5), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Minimum Frequency\n(kHz)",
+             x="") +
+        ggtitle("A") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        theme(plot.margin = unit(c(0.2,4.5,0.2,0.2), "cm")) +  # top, right, bottom, left   
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(fig2.minfreq.main, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.minfreq.main, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_Alldat_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# MINFREQ INSET
+# Box plot of min freq for song1
+(fig2.minfreq.inset <- ggplot(subset(comp, lineage %in% c("southern", "northern")), aes(x=lineage, y=mean_min_freq)) +
+        geom_quasirandom(aes(color=lineage), cex=0.5) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # southern=brown; northern=teal
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.5, alpha=0.7, lwd=0.5) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(5.9), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Minimum Frequency\n(kHz)",
+             x="") +
+        ggtitle("") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=6.5), axis.text.x=element_text(size=6.5), axis.title=element_text(size=6.5))
+)
+ggsave(fig2.minfreq.inset, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.minfreq.inset, filename="BoxPlot_Bioacoustics_MeanMinSongFrequency_ByLineage_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# MINFREQ PANEL (MAIN AND INSET)
+fig2_minfreq_panel <- fig2.minfreq.main + inset_element(fig2.minfreq.inset, left = 0.95, bottom = 0.45, right = 1.55, top = 1.00)
+fig2_minfreq_panel
+
+
+###---
+
+# MAX FREQ MAIN
+(fig2.maxfreq.main <- ggplot(subset(alldat, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_max_freq)) +
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(6.1), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Maximum Frequency\n(kHz)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("B") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,4.5,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(fig2.maxfreq.main, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.maxfreq.main, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_Alldat_2025-11-22.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+# MAXFREQ INSET
+(fig2.maxfreq.inset <- ggplot(subset(comp, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_max_freq)) +
+        geom_quasirandom(aes(color=lineage), cex=0.5) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.5, alpha=0.7, lwd=0.5) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(6.3), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Maximum Frequency\n(kHz)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=6.5), axis.text.x=element_text(size=6.5), axis.title=element_text(size=6.5))
+)
+ggsave(fig2.maxfreq.inset, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.maxfreq.inset, filename="BoxPlot_Bioacoustics_MeanMaxSongFrequency_ByLineage_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# MAXFREQ PANEL (MAIN AND INSET)
+fig2_maxfreq_panel <- fig2.maxfreq.main + inset_element(fig2.maxfreq.inset, left = 0.95, bottom = 0.45, right = 1.55, top = 1.00)
+fig2_maxfreq_panel
+
+###---
+
+# DURATION
+(fig2.duration.main <- ggplot(subset(alldat, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_duration)) +
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(0.19), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Duration\n(secs)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("C") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        theme(plot.margin = unit(c(0.2,4.5,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(fig2.duration.main, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.duration.main, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_Alldat_2025-11-22.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+# DURATION INSET
+(fig2.duration.inset <- ggplot(subset(comp, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_duration)) +
+        geom_quasirandom(aes(color=lineage), cex=0.5) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.5, alpha=0.7, lwd=0.5) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(0.17), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Duration\n(secs)", # Hella confusing formatting for x and y axis labels 
+             x="") +
+        ggtitle("") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=6.5), axis.text.x=element_text(size=6.5), axis.title=element_text(size=6.5))
+)
+ggsave(fig2.duration.inset, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.duration.inset, filename="BoxPlot_Bioacoustics_MeanSongDuration_ByLineage_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# DURATION PANEL (MAIN AND INSET)
+fig2_duration_panel <- fig2.duration.main + inset_element(fig2.duration.inset, left = 0.95, bottom = 0.45, right = 1.55, top = 1.00)
+fig2_duration_panel
+
+
+
+###---
+
+# Frequency Range (aka Bandwidth) MAIN
+(fig2.bandwidth.main <- ggplot(subset(alldat, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_bandwidth)) +
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(4.2), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Bandwidth\n(kHz)", 
+             x="") +
+        ggtitle("D") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        theme(plot.margin = unit(c(0.2,4.5,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(fig2.bandwidth.main, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.bandwidth.main, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_Alldat_2025-11-22.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# BANDWIDTH INSET
+(fig2.bandwidth.inset <- ggplot(subset(comp, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_bandwidth)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage), cex=0.4) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.5, alpha=0.7, lwd=0.5) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(4.3), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Bandwidth\n(kHz)", 
+             x="") +
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=6.5), axis.text.x=element_text(size=6.5), axis.title=element_text(size=6.5))
+)
+ggsave(fig2.bandwidth.inset, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(fig2.bandwidth.inset, filename="BoxPlot_Bioacoustics_MeanFrequencyBandwidth_ByLineage_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# BANDWIDTH PANEL (MAIN AND INSET)
+fig2_bandwidth_panel <- fig2.bandwidth.main + inset_element(fig2.bandwidth.inset, left = 0.95, bottom = 0.45, right = 1.55, top = 1.00)
+fig2_bandwidth_panel
+
+
+#### FINAL PLOT #####
+
+fig2_allpanels <- (fig2_minfreq_panel + 
+                   fig2_maxfreq_panel + 
+                   fig2_duration_panel + 
+                   fig2_bandwidth_panel + 
+                   plot_layout(guides = "collect"))
+plot(fig2_allpanels)
+ggsave(fig2_allpanels, filename = "Fig2_BoxPlots_SongCharacteristics_AllData_and_BreedingOnly_NorthernVSSouthern_2025-11-22.pdf", bg="transparent", height=8, width=11.5, units="in")
+```
+
+
+
+# FIGURE S7: PEAK FREQUENCY
+```{r}
+# Peak Frequency MAIN
+(box.peakfreq.alldat <- ggplot(subset(alldat, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_peakfreq)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(6.0), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+      #  coord_cartesian(ylim = c(4000, 16000)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Peak Frequency\n(kHz)", 
+             x="") +
+        ggtitle("A") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(box.peakfreq.alldat, filename="BoxPlot_Bioacoustics_MeanPeakFrequency_ByLineage_Alldat_2025-11-22.pdf", height=5, width=5, units="in")
+ggsave(box.peakfreq.alldat, filename="BoxPlot_Bioacoustics_MeanPeakFrequency_ByLineage_Alldat_2025-11-22_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+
+# MAXFREQ INSET
+(box.peakfreq.breeddat <- ggplot(subset(comp, lineage %in% c("northern", "southern")), aes(x=lineage, y=mean_peakfreq)) +
+       # facet_wrap(~sex, nrow=2) + 
+        geom_quasirandom(aes(color=lineage)) + 
+        scale_color_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        geom_boxplot(aes(fill = factor(lineage)), outlier.size=0.8, alpha=0.7) +
+        #geom_jitter(position = position_jitter(width = 0.01), alpha = 0.5, size = 2.0) +
+        scale_x_discrete(labels = c("Southern\n(Migrant)", "Northern\n(Resident)")) +  
+        geom_signif(comparisons = list(c("southern", "northern")), # List pairwise comparisons in the order you want sig to appear
+                    y_position=c(6.0), # ypos=c(height of 1st annotation, height of 2nd annotation, 3rd, etc)
+                    map_signif_level=TRUE, tip_length=0.02) +
+      #  coord_cartesian(ylim = c(4000, 16000)) + # Necessary to keep ggsignif askterisks in plot boundaries; get this range w/in data range
+        #stat_summary(fun=mean, colour="firebrick1", geom="point", shape=18, size=3.5) + # Red diamonds at mean 
+        theme_classic() +   # theme_classic() removes all gridlines; theme_bw() retains subtle nice gridlines           
+        theme(panel.grid.minor = element_blank()) +
+        scale_fill_manual(values = c("#bf7b00", "#5a7f00")) + # northern=teal; southern=brown 
+        labs(y="Mean Peak Frequency\n(kHz)", 
+             x="") +
+        ggtitle("B") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        # This is good for labeling figure panels! Avoids having to manually toy w/ hjust and vjust
+        theme(plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +  # top, right, bottom, left    
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        theme(legend.position = "none") +
+        theme(axis.text.y=element_text(size=14), axis.text.x=element_text(size=12), axis.title=element_text(size=12))
+)
+ggsave(box.peakfreq.breeddat, filename="BoxPlot_Bioacoustics_MeanPeakFrequency_ByLineage_BreedingOnly_2025-11-22_5x5in.pdf", height=5, width=5, units="in")
+ggsave(box.peakfreq.breeddat, filename="BoxPlot_Bioacoustics_MeanPeakFrequency_ByLineage_BreedingOnly_2025-11-22.pdf_3.8x3.8in.pdf", height=3.8, width=3.8, units="in")
+
+# MAXFREQ PANEL (MAIN AND INSET)
+peak_frequency_2panel <- (box.peakfreq.alldat + box.peakfreq.breeddat)
+plot(peak_frequency_2panel)
+
+ggsave(peak_frequency_2panel, filename = "FigS7_BoxPlots_MeanPeakFreq_MainAndInset_NorthernVSSouthern_2025-11-22.pdf", bg="transparent", height=6, width=8, units="in")
+```
+
+
+
+# FIGURE 3: PCA and LDA results showing separation of species
+```{r}
+# PANEL A: PCA RESULTS
+
+# original country colors
+ scale_color_manual(name=" ", values=c("Argentina"="#F2C900","Bolivia"="purple","Chile"="#FF0000","Ecuador"="#196C91","Peru"="#99B5BC"))
+
+# MAIN PANEL: annual PCA data (points colored by country, ellipses by species)
+(fig3.a.pca.main <- ggbiplot::ggbiplot(aligned.alldat.sub.pca.output, obs.scale = 1, var.scale = 1, group=country, ellipse = FALSE, circle = TRUE, var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        scale_color_manual(name="lineage", values=c("darkgray", "darkgray", show.legend=FALSE)) + 
+        stat_ellipse(aes(group = lineage, color=lineage), type="norm", size=0.3, show.legend=FALSE) +  
+        new_scale_color() + # Add new scale for the points
+        geom_point(aes(colour=country), size=2.5, alpha=1.0) +
+        scale_color_manual(name=" ", values=c("Argentina"="goldenrod1","Bolivia"="orchid2","Chile"="tomato2",# Southern
+                                              "Ecuador"="darkolivegreen","Peru"="darkseagreen")) + # Northern
+        theme(legend.direction = "horizontal", legend.position = "bottom") + # I changed legend to none for patchwork below
+     #   theme(legend.direction = "none", legend.position = "none") +
+        labs(title="", x="PC1 (81.1%)", y = "PC2 (9.6%)") +
+        ggtitle("A") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(face="bold")) + # This makes panel header bold 
+        theme(plot.margin = unit(c(0,0.4,0,0.2), "cm")) +  # top, right, bottom, left   
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_blank(), 
+             axis.line = element_line(),
+             panel.background = element_blank()) + 
+        theme(axis.text.y=element_text(size=8), axis.text.x=element_text(size=8), axis.title=element_text(size=9))
+ )
+ggsave(fig3.a.pca.main, filename="Patagona_Bioacoustics_Fig3_PanelA_Main_PCA_AllDat_NoLegend_2025-11-22.pdf", height=7, width=9, units="in")
+
+# INSET: breeding season only PCA (points colored by country, ellipses by species)
+(fig3.a.pca.inset <- ggbiplot::ggbiplot(comp.sub.pca.output, obs.scale = 1, var.scale = 1, group=breed.country, ellipse=FALSE, circle = TRUE, 
+        var.axes = FALSE, varname.size=3) + # varaxes = PC arrows; varnam.size = adjusts size of var names
+        scale_color_manual(name="lineage", values=c("southern"="darkgray", "northern"="darkgray")) + 
+        stat_ellipse(aes(group=breed.lineage, color=breed.lineage), type = "norm", size = 0.3) + 
+        new_scale_color() + # Add new scale for the points
+        geom_point(aes(colour=breed.country), size=2, alpha=1.0) +
+        scale_color_manual(name=" ", values=c("Argentina"="goldenrod1","Bolivia"="orchid2","Chile"="tomato2", # Southern
+                                              "Ecuador"="darkolivegreen","Peru"="darkseagreen")) + # Northern
+        theme(legend.direction = "none", legend.position = "none") + 
+        labs(title="", x="PC1 (83.4%)", y = "PC2 (9.2%)") +
+        ggtitle("") + # Assign panel number/header
+        theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+          plot.title = element_text(size=6.5, face="bold")) + # This makes panel header bold 
+        theme(plot.margin = unit(c(0,0,0,0), "cm")) +  # top, right, bottom, left 
+        theme(panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             panel.border = element_blank(), 
+             axis.line = element_line(),
+             panel.background = element_blank()) + 
+        theme(axis.text.y=element_text(size=6), axis.text.x=element_text(size=6), axis.title=element_text(size=7))
+ )
+ggsave(fig3.a.pca.inset, filename="Patagona_Bioacoustics_Fig3_PanelA_Inset_PCA_AllDat_2025-11-22.pdf", height=3, width=5, units="in")
+
+
+# COMBINED PANEL A, PCA RESULTS
+fig3_pca_panel <- fig3.a.pca.main + inset_element(fig3.a.pca.inset, left = 0.60, bottom = 0.60, right = 1.0, top = 1.7)
+fig3_pca_panel
+
+
+# PANEL B: BIOACOUSTICS LDA DENSITY HISTOGRAM
+(fig3.b.lda.histogram <- (ggplot(lda_plot, aes(x=LD1, colour=lineage, fill=lineage)) +
+       geom_density(alpha=0.2, linewidth=0.0) +
+       geom_histogram(position = "identity", alpha = 0.5, bins=40, aes(y = ..density..)) +
+       scale_fill_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color fill
+       scale_color_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color outlines
+      #  scale_x_continuous(limits=c(-5.8,7.8), breaks = c(-6,-4,-2,0,2,4,6)) +
+      #  scale_y_continuous(limits=c(0,0.8), breaks = c(0,0.2,0.4,0.6,0.8)) +
+       labs(title="", x="Discriminant Axis 1", y = "Density") +
+       ggtitle("B           Bioacoustics") + # Assign panel number/header
+      theme(legend.direction = "none", legend.position = "none") + 
+       theme(plot.title.position = "plot", plot.title = element_text(face="bold")) + # "plot" specifies that you want title flush with y-axis
+       theme(
+          panel.border = element_blank(), # Remove panel border
+          panel.grid.major = element_blank(), # element_line(linewidth = 0.5, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.grid.minor = element_blank(),  # element_line(linewidth = 0.25, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.background = element_blank(), # Remove panel background
+          axis.line = element_line(colour = "black") # Add axis line
+             ) + 
+      theme(legend.title=element_text(face="bold")) + # Make legend title bold
+      theme(plot.margin = unit(c(0,0.2,0.2,0.0), "cm")) +  # top, right, bottom, left 
+      theme(axis.text.y=element_text(size=8), axis.text.x=element_text(size=8), axis.title=element_text(size=9)))
+)
+ggsave(fig3.b.lda.histogram, filename="Patagona_Bioacoustics_Fig3_PanelB_LDA-Results_DensityHistogram_2025-11-22.pdf", height=3, width=6, units="in")
+
+
+# PANEL C: FEMALES MORPHOLOGY LDA DENSITY HISTOGRAM
+(fig3.c.lda.histogram <- (ggplot(lda_plot_fem_morpho, aes(x=LD1, colour=analysis.lineage, fill=analysis.lineage)) +
+       geom_density(alpha=0.2, linewidth=0.0) +
+       geom_histogram(position = "identity", alpha = 0.5, bins=40, aes(y = ..density..)) +
+       scale_fill_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color fill
+       scale_color_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color outlines
+      #  scale_x_continuous(limits=c(-5.8,7.8), breaks = c(-6,-4,-2,0,2,4,6)) +
+      #  scale_y_continuous(limits=c(0,0.8), breaks = c(0,0.2,0.4,0.6,0.8)) +
+       labs(title="", x="Discriminant Axis 1", y = " ") +
+       ggtitle("C           Morphology (females)") + # Assign panel number/header
+      theme(legend.direction = "none", legend.position = "none") + 
+       theme(plot.title.position = "plot", plot.title = element_text(face="bold")) + # "plot" specifies that you want title flush with y-axis
+       theme(
+          panel.border = element_blank(), # Remove panel border
+          panel.grid.major = element_blank(), # element_line(linewidth = 0.5, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.grid.minor = element_blank(),  # element_line(linewidth = 0.25, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.background = element_blank(), # Remove panel background
+          axis.line = element_line(colour = "black") # Add axis line
+             ) + 
+      theme(legend.title=element_text(face="bold")) + # Make legend title bold
+      theme(plot.margin = unit(c(0,0.2,0.2,0.0), "cm")) +  # top, right, bottom, left 
+      theme(axis.text.y=element_text(size=8), axis.text.x=element_text(size=8), axis.title=element_text(size=9)))
+)
+ggsave(fig3.c.lda.histogram, filename="Patagona_Bioacoustics_Fig3_PanelC_LDA-MorphologyFemales-Results_DensityHistogram_2025-11-22.pdf", height=3, width=6, units="in")
+
+
+# PANEL D: MALES MORPHOLOGY LDA DENSITY HISTOGRAM
+(fig3.d.lda.histogram <- (ggplot(lda_plot_male_morpho, aes(x=LD1, colour=analysis.lineage, fill=analysis.lineage)) +
+       geom_density(alpha=0.2, linewidth=0.0) +
+       geom_histogram(position = "identity", alpha = 0.5, bins=40, aes(y = ..density..)) +
+       scale_fill_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color fill
+       scale_color_manual(values = c("southern" = "#bf7b00", "northern" = "#5a7f00")) + # Colors for legend color outlines
+      #  scale_x_continuous(limits=c(-5.8,7.8), breaks = c(-6,-4,-2,0,2,4,6)) +
+      #  scale_y_continuous(limits=c(0,0.8), breaks = c(0,0.2,0.4,0.6,0.8)) +
+       labs(title="", x="Discriminant Axis 1", y = " ") +
+       ggtitle("D           Morphology (males)") + # Assign panel number/header
+      theme(legend.direction = "none", legend.position = "none") + 
+       theme(plot.title.position = "plot", plot.title = element_text(face="bold")) + # "plot" specifies that you want title flush with y-axis
+       theme(
+          panel.border = element_blank(), # Remove panel border
+          panel.grid.major = element_blank(), # element_line(linewidth = 0.5, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.grid.minor = element_blank(),  # element_line(linewidth = 0.25, linetype = 'solid', colour = "grey91"), # hatched lines
+          panel.background = element_blank(), # Remove panel background
+          axis.line = element_line(colour = "black") # Add axis line
+             ) + 
+      theme(legend.title=element_text(face="bold")) + # Make legend title bold
+      theme(plot.margin = unit(c(0,0.2,0.2,0.0), "cm")) +  # top, right, bottom, left 
+      theme(axis.text.y=element_text(size=8), axis.text.x=element_text(size=8), axis.title=element_text(size=9)))
+)
+ggsave(fig3.d.lda.histogram, filename="Patagona_Bioacoustics_Fig3_PanelC_LDA-MorphologyMales-Results_DensityHistogram_2025-11-22.pdf", height=3, width=6, units="in")
+
+
+# PANEL E: LDA POSTERIOR PROBABILITY 
+(fig3_e_ldaposterior_bioacoustics <- ggplot(subset(test.probs.comp), aes(x=southern, y=northern, colour=lineage)) + 
+   geom_point(size=2, alpha=0.8) +
+ #  geom_jitter(size = 2, alpha = 0.8, width = 0.02, height = 0.02) + 
+   scale_color_manual(values = c("#bf7b00", "#5a7f00")) + 
+  theme_classic() + 
+  labs(x="Southern\n(posterior probability)",
+       y="Northern\n(posterior probability)") +
+  theme(legend.position = "none") +
+  scale_y_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  scale_x_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  geom_abline(intercept=0.0, slope=1, linetype=3) +
+  annotate(geom="text", x=0.55, y=0.9, label="Model accuracy:\n100%", size=2) + # TAKE ACCURACY FROM ABOVE
+  ggtitle("E") + # Assign panel number/header
+  theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+        plot.title = element_text(face="bold")) + # This makes panel header bold 
+  theme(plot.margin = unit(c(0,0.1,0,0.0), "cm")) +  # top, right, bottom, left 
+  theme(axis.text.y=element_text(size=8), axis.text.x=element_text(size=8), axis.title=element_text(size=9))
+ )
+ggsave(fig3_e_ldaposterior_bioacoustics, filename="Patagona_Bioacoustics_Fig3_PanelE_LDA_PosteriorProbability_2025-11-22.pdf", height=5, width=6, units="in")
+
+
+# PANEL F: LDA POSTERIOR PROBABILITY FROM MORPHOLOGY ANALYSES 
+(fig3_f_ldaposterior_femmorpho <- ggplot(subset(test.probs.fem), aes(x=southern, y=northern, colour=analysis.lineage)) + 
+   geom_point(size=2, alpha=0.8) +
+   scale_color_manual(values = c("#bf7b00", "#5a7f00")) + 
+  theme_classic() + 
+  labs(x="Southern\n(posterior probability)",
+       y=" ") +
+  theme(legend.position = "none") +
+  scale_y_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  scale_x_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+    geom_abline(intercept=0.0, slope=1, linetype=3) +
+    annotate(geom="text", x=0.5, y=0.9, label="Model accuracy:\n70.59%", size=2) + 
+  ggtitle("F") + # Assign panel number/header
+  theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+         plot.title = element_text(face="bold")) + # This makes panel header bold 
+  theme(plot.margin = unit(c(0,0.2,0,0), "cm")) +  # top, right, bottom, left 
+  theme(axis.text.y=element_text(size=8), axis.text.x=element_text(size=8), axis.title=element_text(size=9))
+ )
+ggsave(fig3_f_ldaposterior_femmorpho, filename="Fig3_PanelF_LDA_PosteriorProbability_FemalesMorphology_2025-11-22.pdf", height=5, width=6, units="in")
+
+
+# PANEL G: LDA POSTERIOR PROBABILITY FROM MORPHOLOGY MALES ANALYSES 
+(fig3_g_ldaposterior_malemorpho <- ggplot(subset(test.probs.male), aes(x=southern, y=northern, colour=analysis.lineage)) + 
+   geom_point(size=2, alpha=0.8) +
+   scale_color_manual(values = c("#bf7b00", "#5a7f00")) + 
+  theme_classic() + 
+  labs(x="Southern\n(posterior probability)",
+       y=" ") +
+  theme(legend.position = "none") +
+  scale_y_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+  scale_x_continuous(limits=c(0,1), breaks = c(0.0,0.2,0.4,0.6,0.8,1.0)) +
+    geom_abline(intercept=0.0, slope=1, linetype=3) +
+    annotate(geom="text", x=0.5, y=0.9, label="Model accuracy:\n69.7%", size=2) + 
+  ggtitle("G") + # Assign panel number/header
+  theme(plot.title.position = "plot", # parameter "plot" specifies that you want "title" flush with y-axis
+         plot.title = element_text(face="bold")) + # This makes panel header bold 
+  theme(plot.margin = unit(c(0,0.2,0,0), "cm")) +  # top, right, bottom, left 
+  theme(axis.text.y=element_text(size=8), axis.text.x=element_text(size=8), axis.title=element_text(size=9))
+ )
+ggsave(fig3_g_ldaposterior_malemorpho, filename="Fig3_PanelF_LDA_PosteriorProbability_MalesMorphology_2025-11-22.pdf", height=5, width=6, units="in")
+
+
+#### FINAL PLOT #####
+library(patchwork)
+
+# I'm doing this as a multi-step process because it's the best way to get the panels sized the way I want
+
+# Adjust Panel A (PCA + Inset)
+fig3.a.pca.main.adjusted <- fig3.a.pca.main +
+  inset_element(fig3.a.pca.inset, left = 0.50, bottom = 0.1, right = 1.0, top = 1.7)
+
+# Combine Panels B-G in a clean layout
+fig3.bg.panels <- (
+  (fig3.b.lda.histogram + fig3.c.lda.histogram + fig3.d.lda.histogram) /
+  (fig3_e_ldaposterior_bioacoustics + fig3_f_ldaposterior_femmorpho + fig3_g_ldaposterior_malemorpho)
+)
+
+# Use area to explicitly control the layout
+fig3_allpanels <- 
+  (fig3.a.pca.main.adjusted + 
+     plot_spacer() + 
+     fig3.bg.panels) + 
+  plot_layout(widths = c(1.5, 0, 2)) # 30% narrower Panel A, 30% wider Panels B-G
+plot(fig3_allpanels)
+
+ggsave(fig3_allpanels, filename = "Fig3_PCA-and-LDA_Results_2025-11-22.pdf", bg="transparent", height=5, width=11, units="in")
+```
+
+
+
+## VOCALIZATION SUMMARY STATS TABLES
+
+## Compiled summary stats for gigas/Southern
+```{r}
+# Must specify na.rm=TRUE to deal with NAs in the data 
+
+# Parameter names  
+col1 <- c("Northern", "Northern", "Northern", "Northern", "Northern", "Northern", "Northern", "Northern", "Southern", "Southern", "Southern","Southern", "Southern", "Southern", "Southern", "Southern")
+col2 <- c("Breeding", "Breeding", "Breeding", "Breeding", "Annual", "Annual","Annual", "Annual", "Breeding", "Breeding", "Breeding", "Breeding", "Annual", "Annual","Annual", "Annual")
+
+col3 <- c("Min freq", "Max freq", "Duration", "Frequency range", "Min freq", "Max freq", "Duration", "Frequency range", "Min freq", "Max freq", "Duration", "Frequency range", "Min freq", "Max freq", "Duration", "Frequency range")
+
+
+# northern breeding: known.northern
+# northern annual: alldat.northern
+# southern breeding: known.southern
+# southern annual: alldata.southern
+
+
+# Get sample sizes for each trait
+col4 <- c(
+          round(nrow(known.northern) - sum(is.na(known.northern$mean_min_freq)),2), 
+          round(nrow(known.northern) - sum(is.na(known.northern$mean_max_freq)),2),
+          round(nrow(known.northern) - sum(is.na(known.northern$mean_duration)),2),
+          round(nrow(known.northern) - sum(is.na(known.northern$mean_bandwidth)),2),
+          round(nrow(alldat.northern) - sum(is.na(alldat.northern$mean_min_freq)),2), 
+          round(nrow(alldat.northern) - sum(is.na(alldat.northern$mean_max_freq)),2),
+          round(nrow(alldat.northern) - sum(is.na(alldat.northern$mean_duration)),2),
+          round(nrow(alldat.northern) - sum(is.na(alldat.northern$mean_bandwidth)),2),
+          round(nrow(known.southern) - sum(is.na(known.southern$mean_min_freq)),2), 
+          round(nrow(known.southern) - sum(is.na(known.southern$mean_max_freq)),2),
+          round(nrow(known.southern) - sum(is.na(known.southern$mean_duration)),2),
+          round(nrow(known.southern) - sum(is.na(known.southern$mean_bandwidth)),2),
+          round(nrow(alldat.southern) - sum(is.na(alldat.southern$mean_min_freq)),2), 
+          round(nrow(alldat.southern) - sum(is.na(alldat.southern$mean_max_freq)),2),
+          round(nrow(alldat.southern) - sum(is.na(alldat.southern$mean_duration)),2),
+          round(nrow(alldat.southern) - sum(is.na(alldat.southern$mean_bandwidth)),2)
+          ); col4
+
+# Mean values
+col5 <- c(
+          round(mean(known.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(mean(known.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(mean(known.northern$mean_duration, na.rm=TRUE),2),
+          round(mean(known.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(mean(alldat.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(mean(alldat.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(mean(alldat.northern$mean_duration, na.rm=TRUE),2),
+          round(mean(alldat.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(mean(known.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(mean(known.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(mean(known.southern$mean_duration, na.rm=TRUE),2),
+          round(mean(known.southern$mean_bandwidth, na.rm=TRUE),2),
+          round(mean(alldat.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(mean(alldat.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(mean(alldat.southern$mean_duration, na.rm=TRUE),2),
+          round(mean(alldat.southern$mean_bandwidth, na.rm=TRUE),2)
+          ); col5
+
+# Standard deviations 
+col6 <- c(
+          round(sd(known.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(sd(known.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(sd(known.northern$mean_duration, na.rm=TRUE),2),
+          round(sd(known.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(sd(alldat.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(sd(alldat.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(sd(alldat.northern$mean_duration, na.rm=TRUE),2),
+          round(sd(alldat.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(sd(known.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(sd(known.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(sd(known.southern$mean_duration, na.rm=TRUE),2),
+          round(sd(known.southern$mean_bandwidth, na.rm=TRUE),2),
+          round(sd(alldat.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(sd(alldat.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(sd(alldat.southern$mean_duration, na.rm=TRUE),2),
+          round(sd(alldat.southern$mean_bandwidth, na.rm=TRUE),2)
+          ); col6
+
+# Range: Min values
+col7 <- c(
+          round(min(known.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(min(known.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(min(known.northern$mean_duration, na.rm=TRUE),2),
+          round(min(known.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(min(alldat.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(min(alldat.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(min(alldat.northern$mean_duration, na.rm=TRUE),2),
+          round(min(alldat.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(min(known.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(min(known.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(min(known.southern$mean_duration, na.rm=TRUE),2),
+          round(min(known.southern$mean_bandwidth, na.rm=TRUE),2),
+          round(min(alldat.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(min(alldat.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(min(alldat.southern$mean_duration, na.rm=TRUE),2),
+          round(min(alldat.southern$mean_bandwidth, na.rm=TRUE),2)
+          ); col7
+    
+# Range: Max values
+col8 <- c(
+          round(max(known.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(max(known.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(max(known.northern$mean_duration, na.rm=TRUE),2),
+          round(max(known.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(max(alldat.northern$mean_min_freq, na.rm=TRUE),2), 
+          round(max(alldat.northern$mean_max_freq, na.rm=TRUE),2), 
+          round(max(alldat.northern$mean_duration, na.rm=TRUE),2),
+          round(max(alldat.northern$mean_bandwidth, na.rm=TRUE),2),
+          round(max(known.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(max(known.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(max(known.southern$mean_duration, na.rm=TRUE),2),
+          round(max(known.southern$mean_bandwidth, na.rm=TRUE),2),
+          round(max(alldat.southern$mean_min_freq, na.rm=TRUE),2), 
+          round(max(alldat.southern$mean_max_freq, na.rm=TRUE),2), 
+          round(max(alldat.southern$mean_duration, na.rm=TRUE),2),
+          round(max(alldat.southern$mean_bandwidth, na.rm=TRUE),2)
+          ); col8
+
+#Coefficients of variation
+col9 <- c(
+          round(((sd(known.northern$mean_min_freq, na.rm=TRUE)) / (mean(known.northern$mean_min_freq, na.rm=TRUE))),2),
+          round(((sd(known.northern$mean_max_freq, na.rm=TRUE)) / (mean(known.northern$mean_max_freq, na.rm=TRUE))),2),
+          round(((sd(known.northern$mean_duration, na.rm=TRUE)) / (mean(known.northern$mean_duration, na.rm=TRUE))),2),
+          round(((sd(known.northern$mean_bandwidth, na.rm=TRUE)) / (mean(known.northern$mean_bandwidth, na.rm=TRUE))),2),
+          round(((sd(alldat.northern$mean_min_freq, na.rm=TRUE)) / (mean(alldat.northern$mean_min_freq, na.rm=TRUE))),2),
+          round(((sd(alldat.northern$mean_max_freq, na.rm=TRUE)) / (mean(alldat.northern$mean_max_freq, na.rm=TRUE))),2),
+          round(((sd(alldat.northern$mean_duration, na.rm=TRUE)) / (mean(alldat.northern$mean_duration, na.rm=TRUE))),2),
+          round(((sd(alldat.northern$mean_bandwidth, na.rm=TRUE)) / (mean(alldat.northern$mean_bandwidth, na.rm=TRUE))),2),
+          round(((sd(known.southern$mean_min_freq, na.rm=TRUE)) / (mean(known.southern$mean_min_freq, na.rm=TRUE))),2),
+          round(((sd(known.southern$mean_max_freq, na.rm=TRUE)) / (mean(known.southern$mean_max_freq, na.rm=TRUE))),2),
+          round(((sd(known.southern$mean_duration, na.rm=TRUE)) / (mean(known.southern$mean_duration, na.rm=TRUE))),2),
+          round(((sd(known.southern$mean_bandwidth, na.rm=TRUE)) / (mean(known.southern$mean_bandwidth, na.rm=TRUE))),2),
+          round(((sd(alldat.southern$mean_min_freq, na.rm=TRUE)) / (mean(alldat.southern$mean_min_freq, na.rm=TRUE))),2),
+          round(((sd(alldat.southern$mean_max_freq, na.rm=TRUE)) / (mean(alldat.southern$mean_max_freq, na.rm=TRUE))),2),
+          round(((sd(alldat.southern$mean_duration, na.rm=TRUE)) / (mean(alldat.southern$mean_duration, na.rm=TRUE))),2),
+          round(((sd(alldat.southern$mean_bandwidth, na.rm=TRUE)) / (mean(alldat.southern$mean_bandwidth, na.rm=TRUE))),2)
+          ); col9
+# IMPORTANT NOTE: Data has NAs so calculating CV with the cv() function doesn't work.
+# When I tried using !is.na to exclude NAs from cv() function, my cvs were really high (like 0.4)
+# I decided to calculate manually with sd/mean 
+# I was using this syntax for Hellmayr data: round(cv(hmale.peruviana$bill),2), ; but I decided to switch to the same method for Jessie 4 consistency.
+
+song.data.summary <- as.data.frame(cbind(col1, col2, col3, col4, col5, col6, col7, col8, col9)); song.data.summary
+colnames(song.data.summary) <- c("Species", "Dataset", "Parameter", "n", "Mean (kHz)", "Standard_Deviation", "Min (kHz)", "Max (kHz)", "CV")
+
+# Convert structures (all are characters, weirdly)
+str(song.data.summary)
+song.data.summary$Mean <- as.numeric(song.data.summary$Mean)
+song.data.summary$Standard_Deviation <- as.numeric(song.data.summary$Standard_Deviation)
+song.data.summary$Min <- as.numeric(song.data.summary$Min)
+song.data.summary$Max <- as.numeric(song.data.summary$Max)
+
+write.csv(song.data.summary, "Bioacoustics_SongDataSummaryTable_2025-11-22.csv")
+```
+
+
+---
+
+
+# End
+
+---
+
+
+# Print environment for reproducibility
+```{r}
+sessionInfo() # List of packages and versions in use 
+```
+
+
+###########
+
+## END 

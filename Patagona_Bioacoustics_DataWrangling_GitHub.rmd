@@ -1,0 +1,216 @@
+---
+title: "Patagona bioacoustics data wrangling"
+author: "Jessie Williamson"
+date: "Created: 2024-04-28; last revised: 2026-01-04"
+output: html_document
+---
+
+Patagona bioacoustics data wrangling script for Robinson et al. *Journal of Field Ornithology*. In this script, we read in raw data, organize, and wrangle for downstream paper analyses (conducted in Patagona_Bioacoustics_Analysis_GitHub.Rmd). 
+
+# Load packages
+```{R}
+#library(reshape)
+library(car)
+library(GGally)
+library(Hmisc)
+library(gridExtra)
+library(stats)
+library(gplots)
+library(ggplot2)
+library(lsmeans)
+library(dplyr)
+library(gridExtra)
+library(lattice)
+library(stats4) 
+library(PMCMR) #Allows Kruskal-Wallis post-hocs
+library(reshape2)
+library(arm)
+library(ggfortify) # PCA
+library(cluster)
+library(plyr)
+library(nlme)
+library(rgbif)
+```
+
+
+---
+
+```{R}
+rm(list=ls(all=TRUE)) # clear workspace 
+setwd("/Users/Jessie/Dropbox (MSBbirds)/Rdirectory/Patagona") 
+```
+
+
+# Load data
+```{r}
+bio <- read.csv("/Users/Jessie/MSBbirds Dropbox/Jessie Williamson/Rdirectory/Patagona/RobinsonEtAl2026_PatagonaBioacoustics_AllData_2026-01-04.csv", header=T, na.strings=c("","NA"))
+# Previous version: PatagonaBioacoustics_AllData_2025-11-19.csv
+
+# Sometimes .csv reads in a bunch of blank rows; delete these from the outset
+#bio <- bio[-which(is.na(bio$catalog_number)),] # Drop straggler rows at the bottom with no data 
+```
+
+
+# First trim of the dataset to simplify
+Select only those variables we want to keep (This is a first quick pass - we'll revisit later)
+```{r}
+bio.sub <- subset(bio, select = c(dataset,
+                                catalog_number,
+                                country,
+                                state,
+                                locality,
+                                month,
+                                day,
+                                year,
+                                scorable_YN,
+                                song1_minfreq,
+                                song1_maxfreq,
+                                song1_start,
+                                song1_end,
+                                song1_peakfreq,
+                                song2_minfreq,
+                                song2_maxfreq,
+                                song2_start,
+                                song2_end,
+                                song2_peakfreq,
+                                song3_minfreq,
+                                song3_maxfreq,
+                                song3_start,
+                                song3_end,
+                                song3_peakfreq,
+                                vocal_type,
+                                lineage,
+                                quality,
+                                Latitude,
+                                Longitude,
+                                Recordist,
+                                eBird.Checklist.ID
+                                        ) )
+
+# Rename some columns so we're consistent across the dataset
+library(dplyr) # dplyr masked by functions in reshape and reshape 2
+colnames(bio.sub)
+names(bio.sub)[names(bio.sub) == "Country"] <- "country"
+names(bio.sub)[names(bio.sub) == "State"] <- "state"
+names(bio.sub)[names(bio.sub) == "Locality"] <- "locality"
+names(bio.sub)[names(bio.sub) == "Month"] <- "month"
+names(bio.sub)[names(bio.sub) == "Day"] <- "day"
+names(bio.sub)[names(bio.sub) == "Year"] <- "year"
+names(bio.sub)[names(bio.sub) == "Latitude"] <- "latitude" 
+names(bio.sub)[names(bio.sub) == "Longitude"] <- "longitude" 
+names(bio.sub)[names(bio.sub) == "Recordist"] <- "recordist" 
+names(bio.sub)[names(bio.sub) == "eBird.Checklist.ID"] <- "ebird_checklist_id"
+```
+
+
+# Drop all songs that weren't scorable
+A number of recordings have strong harmonics, distant recordings, or didn't actually pick up Patagona. Let's go ahead and drop these. 
+```{r}
+# We begin with 217 observations...
+bio.sub <- bio.sub[-which(bio.sub$scorable_YN =="N"),] # Drop 57 observations 
+# 160 scorable vocalizations remain
+
+# Note: ~26.2% of our dataset wasn't scorable - that's a lot but understandable. 
+# We've now circled back to these recordings several times and have vetted quality; some are low quality with spectograms that aren't visible, some 
+# involve atypical chatter calls and songs, some involve chases with other individuals. 
+# We expect a high amount of variation in quality from these recordings, so this isn't super unusual. 
+```
+
+
+# DROP DUPLICATE RECORDS
+Screen for duplicate records by comparing dates, localities, recordists, and eBird checklist identifiers (for relevant ML recordings).
+```{r}
+# Find Type 1 duplicates
+dupes_type1 <- bio.sub %>%
+  filter(
+    vocal_type == "type1",
+    !recordist %in% c("Jessie Williamson") # Our birds aren't dups
+  ) %>%
+  group_by(year, month, day, recordist, vocal_type, ebird_checklist_id) %>%
+  filter(n() > 1) %>%
+  ungroup()
+# 8 individuals flagged, let's check
+
+# ...Checked these individually to screen for duplicates - necessary, because individuals recorded by JLW were carefully identified as distinct. 
+# Bolivia and Lima, Peru birds are from JLW
+# 10/25/2022, ebird checklist S121297767, Cusco - different individuals
+
+# Drop Type 1 duplicates: 
+bio.sub <- bio.sub[-which(bio.sub$catalog_number == "472363151"), ] # dup with ML472363141
+bio.sub <- bio.sub[-which(bio.sub$catalog_number == "608933582"), ] # dup with ML608933581
+bio.sub <- bio.sub[-which(bio.sub$catalog_number == "497049791"), ] # dup with ML497049711
+
+# Find Type 2 duplicates
+dupes_type2 <- bio.sub %>%
+  filter(
+    vocal_type == "type2",
+    !recordist %in% c("Ted Parker", "Jessie Williamson", "Luciano Naka", "Peter Boesman", "Pierina A. Bermejo") # Our birds aren't dups
+  ) %>%
+  group_by(year, month, day, recordist, vocal_type, ebird_checklist_id) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+# ...checked these individually to screen for duplicates. JLW and Ted Parker recordings not dups. Luciano Naka's have time stamps an hour apart; not dups. 
+# Peter Boesman's birds both have 2 vocalizations, but timestamps are 1.5 hours apart; leave
+
+# Drop Type 2 duplicates: 
+bio.sub <- bio.sub[-which(bio.sub$catalog_number == "471345"), ] # dup with XC 471344
+bio.sub <- bio.sub[-which(bio.sub$catalog_number == "296347"), ] # dup with XC 296348
+bio.sub <- bio.sub[-which(bio.sub$catalog_number == "95448"), ] # dup with XC 95446
+bio.sub <- bio.sub[-which(bio.sub$catalog_number == "88594751"), ] # dup with ML 88664471
+
+# 153 observations total 
+```
+
+
+# Take a look at structure and coerce variables
+```{r}
+str(bio.sub)
+bio.sub$song1_minfreq <- as.numeric(bio.sub$song1_minfreq)
+bio.sub$song1_maxfreq <- as.numeric(bio.sub$song1_maxfreq)
+bio.sub$song1_peakfreq <- as.numeric(bio.sub$song1_peakfreq)
+bio.sub$song2_minfreq <- as.numeric(bio.sub$song2_minfreq)
+bio.sub$song2_maxfreq <- as.numeric(bio.sub$song2_maxfreq)
+bio.sub$song2_peakfreq <- as.numeric(bio.sub$song2_peakfreq)
+bio.sub$song3_minfreq <- as.numeric(bio.sub$song3_minfreq)
+bio.sub$song3_maxfreq <- as.numeric(bio.sub$song3_maxfreq)
+bio.sub$song3_peakfreq <- as.numeric(bio.sub$song3_peakfreq)
+bio.sub$country <- as.factor(bio.sub$country)
+bio.sub$state <- as.factor(bio.sub$state)
+bio.sub$lineage <- as.factor(bio.sub$lineage)
+bio.sub$vocal_type <- as.factor(bio.sub$vocal_type)
+```
+
+
+# Drop lineage designation intentionally here
+As we implement the new Type 1 and Type 2 framework. We'll add this back in our analysis script (with any relevant updates)
+```{r}
+bio.sub2 <- subset(bio.sub, select = -c(lineage))
+```
+
+
+# Write out dataset to use in analysis
+Final analysis dataset to use downstream.
+```{r}
+write.csv(bio.sub2, "/Users/Jessie/MSBbirds Dropbox/Jessie Williamson/Rdirectory/Patagona/Patagona_Bioacoustics_CleanForAnalysis_2026-01-04.csv")
+# Previous version: Patagona_Bioacoustics_CleanForAnalysis_2025-11-19.csv
+```
+
+
+
+This script picks up at the beginning of Patagona_Bioacoustics_Analysis_GitHub.
+
+
+# End
+
+---
+
+
+# Print environment for reproducibility
+```{r}
+sessionInfo() # List of packages and versions in use 
+```
+
+###########
+
+## END 
